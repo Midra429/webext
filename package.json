@@ -1,0 +1,45 @@
+{
+  "name": "@midra/webext",
+  "version": "0.0.0",
+  "description": "ブラウザ拡張機能の開発用ライブラリ",
+  "author": "Midra <me@midra.me> (https://github.com/Midra429)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Midra429/nco-utils.git"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org"
+  },
+  "scripts": {
+    "prebuild": "bun run --shell bun clean",
+    "build": "tsdown",
+    "clean": "rm -rf dist",
+    "test": "bun run --sequential \"test:*\"",
+    "compile": "tsc --noEmit --skipLibCheck",
+    "check": "biome check --write",
+    "gen-exports": "bun run scripts/generate-exports.ts"
+  },
+  "type": "module",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "dependencies": {
+    "comctx": "^1.7.5",
+    "@types/chrome": "^0.3.4",
+    "@types/webextension-polyfill": "^0.12.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "@types/bun": "^1.4.2",
+    "rolldown": "^1.2.11",
+    "tsdown": "^0.23.0",
+    "typescript": "^7.0.2"
+  }
+}
