@@ -1,6 +1,6 @@
 {
   "name": "@midra/webext",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "ブラウザ拡張機能の開発用ライブラリ",
   "author": "Midra <me@midra.me> (https://github.com/Midra429)",
   "license": "MIT",
