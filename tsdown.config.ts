@@ -5,7 +5,7 @@ export const chunkDir: string = 'chunks'
 
 export default defineConfig({
   outDir,
-  entry: 'src/**/*.ts',
+  entry: ['src/index.ts'],
   format: 'esm',
   target: 'esnext',
   platform: 'browser',

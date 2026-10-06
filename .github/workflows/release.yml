@@ -36,6 +36,7 @@ jobs:
       - name: パッケージをビルド
         run: |
           bun install --frozen-lockfile
+          bun run validate
           bun run build
 
       - name: package.jsonのexportsを更新

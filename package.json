@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Midra429/nco-utils.git"
+    "url": "https://github.com/Midra429/webext.git"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org"
@@ -14,10 +14,13 @@
   "scripts": {
     "prebuild": "bun run --shell bun clean",
     "build": "tsdown",
+    "demo:build": "bun run demo/build.ts",
     "clean": "rm -rf dist",
-    "test": "bun run --sequential \"test:*\"",
+    "test": "bun test",
     "compile": "tsc --noEmit --skipLibCheck",
-    "check": "biome check --write",
+    "check": "biome check",
+    "check:fix": "biome check --write",
+    "validate": "bun run check && bun run compile && bun test",
     "gen-exports": "bun run scripts/generate-exports.ts"
   },
   "type": "module",
@@ -26,19 +29,18 @@
   "files": ["dist"],
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
   "dependencies": {
-    "comctx": "^1.7.5",
     "@types/chrome": "^0.3.4",
     "@types/webextension-polyfill": "^0.12.6"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.14",
+    "@biomejs/biome": "^2.5.15",
     "@types/bun": "^1.4.2",
-    "rolldown": "^1.2.11",
+    "rolldown": "^1.2.12",
     "tsdown": "^0.23.0",
     "typescript": "^7.0.2"
   }
