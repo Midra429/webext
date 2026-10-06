@@ -9,7 +9,7 @@ Chrome / Firefox の WebExtensions API を共通のインターフェースで�
 - **サイドパネル**：`webext.side` で Chrome / Firefox の操作を共通化。
 - **タブ取得・ポップアウト**：コンテンツスクリプト自身のタブ取得と、タブに関連付けた別ウィンドウの作成。
 - **ストレージ**：不足メソッドの補完、値の取得・保存、変更監視。
-- **型付きメッセージング**：チャンネルごとのリクエスト・レスポンスの型定義。
+- **型付きメッセージング**：チャンネルごとのリクエスト・レスポンスの型定義。MAIN worldとの双方向通信にも対応。
 - **メニュー**：`menus` で Firefox の `menus` / Chrome の `contextMenus` の差異を吸収。
 
 グローバルの `chrome` / `browser` は変更しません。WXT、ビルド時のブラウザ指定、追加のランタイム依存は不要です。
@@ -218,6 +218,76 @@ const result = await channel.send('greet', { name: 'Midra' })
 - 型は実行時検証ではありません。受信値やsenderの追加検証は必要に応じてhandler内で行ってください。
 - `stop()` / `channel.dispose()` / `webext.dispose()` でリスナーを解除。
 
+### MAIN worldとの通信
+
+MAIN worldでは拡張APIを使えないため、`createMainWorldMessaging()` を使用します。同じフレームのISOLATED worldコンテンツスクリプトで、中継を登録してください。既存の `channel().send()/handle()` とスキーマを共有できます。
+
+```ts
+// 共通の型
+interface WorldMessages {
+  greet: { request: string; response: string }
+}
+```
+
+```ts
+// ISOLATED worldのコンテンツスクリプト
+import { webext } from '@midra/webext'
+
+const stopBridge = webext.messaging.bridgeMainWorld({
+  namespace: 'my-extension/world',
+  channels: ['app/world'], // 中継を許可するチャンネルだけ指定
+})
+const channel = webext.messaging.channel<WorldMessages>('app/world')
+channel.handle('greet', (name) => `Content: ${name}`)
+
+const reply = await channel.send('greet', 'Midra', { target: 'main-world' })
+```
+
+```ts
+// MAIN worldのスクリプト
+import { createMainWorldMessaging } from '@midra/webext'
+
+const messaging = createMainWorldMessaging({ namespace: 'my-extension/world' })
+const channel = messaging.channel<WorldMessages>('app/world')
+channel.handle('greet', (name) => `MAIN: ${name}`)
+
+const backgroundReply = await channel.send('greet', 'Midra')
+const contentReply = await channel.send('greet', 'Midra', {
+  target: 'content-script',
+})
+```
+
+```ts
+// background（トップレベルで登録）
+import { webext } from '@midra/webext'
+
+const channel = webext.messaging.channel<WorldMessages>('app/world')
+channel.handle('greet', (name, sender) => {
+  console.log(sender.world, sender.tab?.id) // MAIN由来ならworldは 'MAIN'
+  return `Background: ${name}`
+})
+
+// 任意のタイミングで、対象タブ・フレームのMAIN worldへ送る
+const reply = await channel.send('greet', 'Midra', {
+  target: 'main-world', tabId: 123, frameId: 0,
+})
+```
+
+| 送信元 → 送信先 | `send()` の指定 |
+| --- | --- |
+| MAIN → background | 指定なし（または `target: 'background'`） |
+| MAIN → 同じフレームのcontent script | `target: 'content-script'` |
+| content script → 同じフレームのMAIN | `target: 'main-world'` |
+| background / 拡張ページ → MAIN | `target: 'main-world', tabId`。必要なら `frameId` / `documentId` |
+
+- 中継はコンテンツスクリプトのインスタンスにつき1つ。送信前に両worldのスクリプト・受信ハンドラー・中継を登録してください。MAIN worldのスクリプトの注入は利用側で行います。
+- 中継に指定していないチャンネルは公開しません。通常のruntime/tabs通信は従来どおり動作します。`target: 'background'` は `runtime.sendMessage()` を使うため、該当する拡張内ハンドラーは1つにしてください。
+- MAIN由来の要求には `sender.world: 'MAIN'` を付けます。backgroundにはネイティブの実際のタブ・フレーム情報を渡します。content script内のハンドラーにはページURLを渡し、拡張ID・タブIDは付けません。
+- 通信は同じWindow・origin・namespaceに限定しますが、**ページのスクリプトも内容を読み書きできます**。namespace・`sender.world` は認証に使えません。公開する処理と要求値を検証し、機密情報をこの通信に載せないでください。
+- JSON制約・`RemoteError`・タイムアウト・`AbortSignal` は既存の通信と同じです。タイムアウト／中止時にはDOM応答の待機も解除します。
+- `stopBridge()` / `webext.dispose()` は中継を解除します。`messaging.dispose()` はMAIN側を解除します。これらの破棄は未完了のDOM応答待機を拒否します。受信済みの処理は継続します。
+- 通常のHTTP(S)ページが対象です。`data:` やsandbox iframeなど、originが `null` のドキュメントは非対応です。
+
 ## ネイティブ API と移行
 
 ブラウザ固有の操作には `webext.native` を使用できます。`webext.sidePanel` / `webext.sidebarAction` もネイティブのままです。
@@ -273,7 +343,7 @@ bun run build
 - `src/disposables.ts` / `src/facade.ts`：解除処理の管理、ネイティブAPIを変更しないラッパー。
 - `demo/src/operations.ts`：ユーザー操作を維持した実行と、ボタンごとの実行中状態の管理。
 
-メッセージの受信リスナーは `createWebExt()` のインスタンスごとに1つを共有し、handlerが存在する間だけ登録します。ストレージの監視とactionクリックの解除関数は、繰り返し呼んでも解除処理を重複実行しません。
+ネイティブメッセージの受信リスナーは `createWebExt()` のインスタンスごとに1つを共有し、handlerまたはMAIN world中継が存在する間だけ登録します。ストレージの監視とactionクリックの解除関数は、繰り返し呼んでも解除処理を重複実行しません。
 
 ### 検証範囲
 

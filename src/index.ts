@@ -3,9 +3,13 @@
 export type { WebExtContext } from './context'
 export type { CreateWebExtOptions, WebExt } from './core'
 export type {
+  MainWorldBridgeOptions,
+  MainWorldMessaging,
+  MainWorldOptions,
   MessageChannel,
   MessageDefinition,
   MessageSchema,
+  MessageSender,
   Messaging,
   SendOptions,
 } from './messaging'
@@ -25,3 +29,4 @@ export {
   RemoteError,
   UnsupportedOperationError,
 } from './errors'
+export { createMainWorldMessaging } from './messaging'

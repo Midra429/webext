@@ -36,12 +36,19 @@ export type MessageSchema = Record<string, MessageDefinition>
  *
  * @remarks
  * `tabId` がなければ自拡張への `runtime.sendMessage()`、あれば `tabs.sendMessage()` を使用します。
- * 外部拡張・Webページ宛ての送信は提供しません。対象フレーム・ドキュメントの存在と各オプションへの
+ * MAIN world宛ては明示登録したコンテンツスクリプト中継を使います。外部拡張への送信は提供しません。
+ * 対象フレーム・ドキュメントの存在と各オプションへの
  * 対応はネイティブAPIに従い、未対応の指定を代替しません。
  * @see https://developer.chrome.com/docs/extensions/reference/api/runtime#method-sendMessage
  * @see https://developer.chrome.com/docs/extensions/reference/api/tabs#method-sendMessage
  */
 export interface SendOptions {
+  /**
+   * 送信先のworld。省略時は従来のruntime/tabs送信、MAIN world側ではbackground宛て。
+   * `content-script` はMAIN worldから同じフレームへの送信で使用します。
+   * `main-world` はコンテンツスクリプトから同じフレーム、background等からは `tabId` と併用します。
+   */
+  target?: 'background' | 'content-script' | 'main-world'
   /**
    * 送信先コンテンツスクリプトを含むタブID。非負の安全な整数が必要です。
    * @remarks ネイティブの `tabs.sendMessage()` が使えるコンテキストと、対象タブの受信ハンドラーが必要です。
@@ -78,8 +85,10 @@ export interface SendOptions {
  *
  * @typeParam Schema - メッセージ名ごとの要求型・応答型。実行時スキーマ検証は行いません。
  * @remarks
- * ファクトリーごとに単一の `runtime.onMessage` ルーターを共有し、ハンドラーがある間だけ登録します。
- * 受信は `sender.id === runtime.id` の内部メッセージに限定し、未登録のチャンネル・メッセージは扱いません。
+ * 拡張側は単一の `runtime.onMessage` ルーターを共有し、ハンドラーまたは中継がある間だけ登録します。
+ * ネイティブ受信は `sender.id === runtime.id` の内部メッセージに限定します。
+ * MAIN worldとのDOM通信はページも読み書きできます。中継の許可チャンネルは明示登録してください。
+ * 未登録のチャンネル・メッセージは扱いません。
  * この確認は要求内容や送信元URLの信頼性を保証しません。必要な検証はハンドラーで行ってください。
  * 1つの要求に応答するコンテキストは1つにしてください。複数の受信先が応答する場合の順序は保証しません。
  * @see https://developer.chrome.com/docs/extensions/reference/api/runtime#type-MessageSender
@@ -103,8 +112,10 @@ export interface MessageChannel<
    * @throws 破棄済みチャンネル・非互換の応答・ネイティブ通信エラー・シグナル中止理由。
    * @remarks
    * 上記の失敗はすべて戻り値のPromiseの拒否です（同期例外ではありません）。受信先がない場合も成功扱いにしません。
-   * `tabId` なしの送信は送信元自身を除く拡張コンテキスト宛てで、コンテンツスクリプト宛てではありません。
-   * コンテンツスクリプトへは `tabId` を指定してください。待機の中止は受信処理を停止しません。
+   * 通常の `tabId` なしの送信は送信元自身を除く拡張コンテキスト宛てです。
+   * 拡張側からコンテンツスクリプトへは `tabId` を指定してください。
+   * MAIN world側の `target: 'content-script'` は同じフレームへ送り、タブ指定はできません。
+   * `target: 'main-world'` は明示登録した中継を使います。待機の中止は受信処理を停止しません。
    * @see https://developer.chrome.com/docs/extensions/reference/api/runtime#method-sendMessage
    * @see https://developer.chrome.com/docs/extensions/reference/api/tabs#method-sendMessage
    * @see https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/runtime/sendMessage
@@ -119,9 +130,9 @@ export interface MessageChannel<
    *
    * @typeParam K - スキーマ内のメッセージ名。
    * @param type - 処理するメッセージ名。同じチャンネル内で重複登録はできません。
-   * @param handler - 要求値とネイティブのMessageSenderを受け取り、JSON互換の応答値またはそのPromiseを返す関数。
+   * @param handler - 要求値とMessageSenderを受け取り、JSON互換の応答値またはそのPromiseを返す関数。
    * @returns この登録だけを解除する関数。繰り返し呼んでも一度だけ解除し、後続の再登録は解除しません。
-   * @throws {UnsupportedOperationError} `runtime.onMessage` が利用できない場合に同期的に送出します。
+   * @throws {UnsupportedOperationError} 拡張側で `runtime.onMessage` が利用できない場合に同期的に送出します。
    * @throws 破棄済みチャンネル・同じメッセージ名の重複登録は同期例外です。
    * @remarks
    * 受信イベント内でハンドラーを同期的に呼び、その結果をawaitしてcallbackで応答します。
@@ -143,7 +154,7 @@ export interface MessageChannel<
     type: K,
     handler: (
       request: Schema[K]['request'],
-      sender: Browser.Runtime.MessageSender
+      sender: MessageSender
     ) => Schema[K]['response'] | Promise<Schema[K]['response']>
   ): () => void
   /**
@@ -153,12 +164,20 @@ export interface MessageChannel<
    * @remarks
    * 以後の `send()` はPromiseの拒否、`handle()` は同期例外になります。
    * ファクトリーが未破棄なら `messaging.channel(name)` で同名の新しいチャンネルを作れます。
-   * 既に実行中のハンドラーや送信側の待機はキャンセルしません。
+   * 既に実行中のハンドラーや送信側の待機はキャンセルしません。DOMの待機はファクトリー／中継の破棄で拒否します。
    */
   dispose(): void
 }
 /** 名前付きチャンネルを管理する、WebExtインスタンスごとのメッセージングファクトリー。 */
 export interface Messaging {
+  /**
+   * 同じフレームのMAIN worldとの中継を登録し、解除関数を返します。
+   * コンテンツスクリプトで呼び、両worldで同じnamespaceを指定してください。
+   * 許可したチャンネルだけを中継します。ページも通信を読み書きできるため、
+   * namespaceは認証情報ではありません。入力・送信元はhandlerで検証してください。
+   * 1インスタンスにつき1つ登録でき、disposeでも解除します。
+   */
+  bridgeMainWorld(options: MainWorldBridgeOptions): () => void
   /**
    * 名前に対応するチャンネルを取得・作成します。
    *
@@ -184,7 +203,7 @@ export interface Messaging {
    * @remarks
    * `webext.dispose()` でも呼ばれます。破棄後は `channel()` を呼べません。
    * 再利用には `createWebExt()` で新しいインスタンスを作成してください。
-   * 送信済みの待機や実行中の受信処理をキャンセルするものではありません。
+   * DOMの応答待機は拒否します。ネイティブ送信の待機や実行中の受信処理は継続します。
    */
   dispose(): void
 }
@@ -198,7 +217,24 @@ export interface MessagingApi {
 }
 
 /** 共有ルーターが保持する、スキーマを消去した内部ハンドラー型。 @internal */
-export type Handler = (
-  request: unknown,
-  sender: Browser.Runtime.MessageSender
-) => unknown
+export type Handler = (request: unknown, sender: MessageSender) => unknown
+
+/** ネイティブの送信元情報。MAIN world由来の要求には `world: 'MAIN'` を付けます。 */
+export type MessageSender = Browser.Runtime.MessageSender & { world?: 'MAIN' }
+
+/** MAIN worldとコンテンツスクリプトで共有するDOM通信の設定。 */
+export interface MainWorldOptions {
+  /** 拡張ごとに固有の名前。同じフレームで両worldが同じ値を使います。認証には使えません。 */
+  namespace: string
+  /** 通信に使う同じフレームのWindow。省略時はglobalThis.window。テスト用に注入できます。 */
+  window?: Window
+}
+
+/** コンテンツスクリプト側でMAIN worldに公開するチャンネル。 */
+export interface MainWorldBridgeOptions extends MainWorldOptions {
+  /** 中継を許可するチャンネル名。内部タブ取得など、未指定のチャンネルは公開しません。 */
+  channels: readonly string[]
+}
+
+/** 拡張APIがないMAIN worldで使うチャンネル管理API。 */
+export type MainWorldMessaging = Pick<Messaging, 'channel' | 'dispose'>

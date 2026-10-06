@@ -10,12 +10,22 @@ import { encode } from './serialization'
 
 const MAX_TIMEOUT_MS = 2_147_483_647
 
+export interface PendingResponse {
+  response: Promise<unknown>
+  dispose(): void
+}
+
+export type RequestTransport = (
+  message: Record<string, unknown>
+) => PendingResponse
+
 export async function sendMessage<Response>(
-  api: MessagingApi,
+  api: MessagingApi | undefined,
   name: string,
   type: string,
   request: unknown,
-  options: SendOptions = {}
+  options: SendOptions = {},
+  transport?: RequestTransport
 ): Promise<Response> {
   const timeoutMs = options.timeoutMs ?? 10_000
   if (
@@ -36,14 +46,32 @@ export async function sendMessage<Response>(
   ) {
     throw new TypeError('frameId/documentId requires tabId')
   }
+  if (
+    options.target !== undefined &&
+    !['background', 'content-script', 'main-world'].includes(options.target)
+  )
+    throw new TypeError('Invalid message target')
+  if (options.target === 'background' && options.tabId !== undefined)
+    throw new TypeError('background target cannot be combined with tabId')
   const message = {
     __webext_rpc__: 1,
     channel: name,
     type,
     payload: encode(request),
     empty: request === undefined,
+    ...(options.target === 'main-world'
+      ? { target: 'main-world', timeoutMs }
+      : {}),
   }
+  let pending: PendingResponse | undefined
   const send = () => {
+    if (transport) {
+      pending = transport(message)
+      return pending.response
+    }
+    if (!api) throw new UnsupportedOperationError('messaging.send')
+    if (options.target === 'content-script' && options.tabId === undefined)
+      throw new TypeError('content-script target requires tabId')
     // メソッドを所有オブジェクト経由で呼び、ネイティブ API の this を保持します。
     if (options.tabId === undefined) return api.runtime.sendMessage(message)
     if (!api.tabs?.sendMessage)
@@ -95,6 +123,7 @@ export async function sendMessage<Response>(
       )
     return (response.empty ? undefined : response.value) as Response
   } finally {
+    pending?.dispose()
     if (timer !== undefined) clearTimeout(timer)
     if (onAbort) options.signal?.removeEventListener('abort', onAbort)
   }

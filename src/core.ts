@@ -128,7 +128,7 @@ export type WebExt = Omit<
    *
    * @remarks
    * 繰り返し呼べます。保存値・パネル・ネイティブ設定・直接登録されたリスナーは変更しません。
-   * 送信済みの待機や実行中の受信処理はキャンセルしません。
+   * MAIN world中継のDOM応答待機は拒否します。ネイティブ送信の待機や実行中の受信処理は継続します。
    * メッセージングは終端的に破棄されるため、再利用には `createWebExt()` で新しいインスタンスを作成してください。
    */
   dispose(): void
@@ -166,7 +166,7 @@ export function createWebExt(options: CreateWebExtOptions = {}): WebExt {
 
   const extensionUrl = new URL(api.runtime.getURL('/'))
   const context = createContext(api, extensionUrl, options)
-  const messaging = createMessaging(api)
+  const messaging = createMessaging(api, context.type ?? undefined)
   const { tabs, initialize } = createTabs(api, context, messaging)
   const { resolveTabId, openPopout } = createPopout(api, extensionUrl, () =>
     tabs.getTargetId()
