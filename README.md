@@ -174,13 +174,26 @@ await webext.side.openPopout({ tabId: null }) // リンクなし
 存在する `local` / `sync` / `managed` / `session` 領域に同じヘルパーを提供します。権限が必要です。未対応のsession領域はメモリや永続領域で代用しません。managed領域の書き込みはネイティブ側で拒否されます。
 
 ```ts
-const theme = await webext.storage.local.getValue('theme', 'system')
-await webext.storage.local.setValue('theme', 'dark')
-const stop = webext.storage.local.watch<string>('theme', (value, previous) => {
+const settings = webext.storage.local.namespace('settings')
+const theme = await settings.getValue('theme', 'system')
+await settings.setValue('theme', 'dark') // 実際の保存キー: settings:theme
+const stop = settings.watch<string>('theme', (value, previous) => {
   console.log(previous, value)
 })
 stop()
+
+await settings.set({ theme: 'light', fontSize: 16 })
+const values = await settings.get({ theme: 'system' }) // { theme: 'light' }
+const keys = await settings.getKeys() // ['theme', 'fontSize']（接頭辞なし）
+await settings.remove('fontSize')
+await settings.clear() // settings: のキーだけ削除。他の名前空間は維持
 ```
+
+`namespace(name)` は全領域で利用できます。名前空間名は空文字・`:` を含む文字列を禁止します。キーには空文字や `:` も利用できます。`get()` / `get(null)`、`getKeys()`、`getBytesInUse()`、`clear()` はその名前空間だけを対象にし、`get()` の既定値の辞書も接頭辞なしで指定します。バイト数は名前空間の接頭辞を含む実保存キーで計測します。
+
+名前空間はキーの整理用で、権限やクォータを分離しません。全件操作では領域全体の読み取りまたはキー列挙が必要で、`clear()` は列挙後に他のコンテキストで追加されたキーの削除を保証しません。監視は `webext.dispose()` でも解除できます。名前空間側には未加工のネイティブイベントを公開しません。
+
+従来の `webext.storage.local.setValue('theme', ...)` などは接頭辞なしのまま動作します。既存データの自動移行は行いません。ネイティブAPIで保存した `settings:theme` も同じ名前空間からアクセスできます。
 
 - `getKeys()`：ネイティブ優先。補完時は `get(null)` で全値を読んでキーを取得。
 - `getBytesInUse(keys?)`：ネイティブ優先。補完時はキーとJSON化した値のUTF-8バイト数の合計。**推定値で、ディスク使用量やクォータ判定には使えません。**

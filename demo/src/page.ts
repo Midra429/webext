@@ -1,4 +1,4 @@
-import type { StorageArea } from '../../src'
+import type { NamespacedStorageArea } from '../../src'
 import type { BackgroundMessages, ContentMessages } from './messages'
 
 import { RemoteError, webext } from '../../src'
@@ -55,7 +55,7 @@ function log(label: string, value: unknown, kind = 'success') {
   while (results.children.length > 20) results.lastElementChild?.remove()
   status.textContent = `${label}: ${kind === 'error' ? 'エラー（詳細はログを確認）' : '完了'}`
 }
-function storage(): StorageArea {
+function storage(): NamespacedStorageArea {
   const name = areaSelect.value
   if (
     name !== 'local' &&
@@ -66,7 +66,7 @@ function storage(): StorageArea {
     throw new Error('不正なストレージ領域です')
   const area = webext.storage[name]
   if (!area) throw new Error(`${name} はこの環境で利用できません`)
-  return area
+  return area.namespace('demo')
 }
 function updateControls() {
   const cap = webext.side.capabilities
@@ -168,20 +168,20 @@ storageForm.addEventListener('submit', (event) => {
   event.preventDefault()
   void execute(
     'setValue',
-    () => storage().setValue('demo:value', storedValue.value),
+    () => storage().setValue('value', storedValue.value),
     saveButton
   )
 })
 bind('read', '保存データ', async () => {
   const area = storage()
   const [value, keys, bytes] = await Promise.all([
-    area.getValue('demo:value'),
+    area.getValue('value'),
     area.getKeys(),
     area.getBytesInUse(),
   ])
   return { value: value ?? null, keys, bytes, capabilities: area.capabilities }
 })
-bind('remove', 'remove', () => storage().remove('demo:value'))
+bind('remove', 'remove', () => storage().remove('value'))
 bind('watch', '変更監視', () => {
   if (stopWatch) {
     stopWatch()
@@ -190,7 +190,7 @@ bind('watch', '変更監視', () => {
     return '監視を停止しました'
   }
   const name = areaSelect.value
-  stopWatch = storage().watch<string>('demo:value', (value, previous) => {
+  stopWatch = storage().watch<string>('value', (value, previous) => {
     log(
       `watch (${name})`,
       { previous: previous ?? null, value: value ?? null },
@@ -243,7 +243,7 @@ bind('inspect-content', 'コンテンツスクリプト', async () => {
   }
 })
 bind('menu-result', '右クリックメニューの記録', () =>
-  webext.storage.local.getValue('demo:menu', null)
+  webext.storage.local.namespace('demo').getValue('menu', null)
 )
 buttonElement('clear').addEventListener('click', () => {
   results.replaceChildren()

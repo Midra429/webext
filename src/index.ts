@@ -20,7 +20,12 @@ export type {
   SidePathTarget,
   SideTarget,
 } from './side'
-export type { StorageArea, StorageHelpers, WebExtStorage } from './storage'
+export type {
+  NamespacedStorageArea,
+  StorageArea,
+  StorageHelpers,
+  WebExtStorage,
+} from './storage'
 export type { WebExtTabs } from './tabs'
 
 export { createWebExt, webext } from './core'

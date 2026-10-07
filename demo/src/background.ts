@@ -53,7 +53,7 @@ webext.menus.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== 'demo-record-tab') return
   void (async () => {
     try {
-      await webext.storage.local.setValue('demo:menu', {
+      await webext.storage.local.namespace('demo').setValue('menu', {
         time: new Date().toISOString(),
         tabId: tab?.id ?? null,
         title: tab?.title ?? null,

@@ -121,7 +121,29 @@ export interface StorageHelpers {
  * @see https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/storage/StorageArea/get
  */
 export type StorageArea = Omit<Browser.Storage.StorageArea, 'getBytesInUse'> &
-  StorageHelpers
+  StorageHelpers & {
+    /**
+     * `{name}:{key}` 形式で保存する名前空間を選択します。
+     * `name` は空文字・コロンを含む文字列を指定できません（同期的にTypeError）。
+     * 戻り値の全メソッドは接頭辞なしのキーを受け取り、返すキーも接頭辞なしです。
+     * 元の領域やネイティブAPIの動作は変更しません。
+     */
+    namespace(name: string): NamespacedStorageArea
+  }
+
+/**
+ * 名前空間内だけを読み書きするストレージ。
+ *
+ * @remarks
+ * `get()` / `get(null)` はこの名前空間の全件、`clear()` はこの名前空間だけの削除です。
+ * `getKeys()` は接頭辞を除いたキーを返し、`getBytesInUse()` は接頭辞を含む実保存キーで計測します。
+ * 全件取得・削除・計測には領域全体のキー列挙または読み取りが必要です。
+ * `clear()` は列挙後に追加されたキーの削除を保証しません。
+ * `watch()` は元の領域と監視解除処理を共有します。ネイティブイベントは公開しません。
+ * 名前空間はキーの整理用であり、権限・クォータ・アクセス制限を分離しません。
+ */
+export type NamespacedStorageArea = StorageHelpers &
+  Pick<Browser.Storage.StorageArea, 'get' | 'set' | 'remove' | 'clear'>
 /**
  * 拡張機能のネイティブストレージと共通ヘルパー。
  *
@@ -194,6 +216,77 @@ function estimateBytes(values: Record<string, unknown>): number {
   return bytes
 }
 
+function createNamespace(
+  area: StorageArea,
+  name: string
+): NamespacedStorageArea {
+  if (typeof name !== 'string' || name.length === 0 || name.includes(':'))
+    throw new TypeError(
+      'Storage namespace must be non-empty and contain no colon'
+    )
+  const prefix = `${name}:`
+  const qualify = (key: string) => {
+    if (typeof key !== 'string')
+      throw new TypeError('Storage key must be a string')
+    return `${prefix}${key}`
+  }
+  const qualifyKeys = (keys: string | string[]) =>
+    Array.isArray(keys) ? keys.map(qualify) : qualify(keys)
+  const encode = (items: Record<string, unknown>) =>
+    Object.fromEntries(
+      Object.entries(items).map(([key, value]) => [qualify(key), value])
+    )
+  const decode = (items: Record<string, unknown>) =>
+    Object.fromEntries(
+      Object.entries(items)
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([key, value]) => [key.slice(prefix.length), value])
+    )
+  const storedKeys = async () =>
+    (await area.getKeys()).filter((key) => key.startsWith(prefix))
+
+  return {
+    capabilities: area.capabilities,
+    async get(keys = null) {
+      const qualified =
+        keys == null
+          ? null
+          : typeof keys === 'string' || Array.isArray(keys)
+            ? qualifyKeys(keys)
+            : encode(keys)
+      return decode(await area.get(qualified))
+    },
+    async set(items) {
+      await area.set(encode(items))
+    },
+    async remove(keys) {
+      await area.remove(qualifyKeys(keys))
+    },
+    async clear() {
+      const keys = await storedKeys()
+      // 読み取り専用領域では空の名前空間でもネイティブの拒否を伝播させる。
+      await area.remove(keys)
+    },
+    async getKeys() {
+      return (await storedKeys()).map((key) => key.slice(prefix.length))
+    },
+    async getBytesInUse(keys = null) {
+      return area.getBytesInUse(
+        keys == null ? await storedKeys() : qualifyKeys(keys)
+      )
+    },
+    async getValue<T>(key: string, defaultValue?: T): Promise<T> {
+      return area.getValue(qualify(key), defaultValue as T)
+    },
+    async setValue(key, value) {
+      await area.setValue(qualify(key), value)
+    },
+    watch(key, listener) {
+      return area.watch(qualify(key), listener)
+    },
+  }
+}
+
 /**
  * ネイティブAPIを変更せず、存在する領域にヘルパーを追加します。
  * @param storage - ラップするネイティブストレージAPI。
@@ -249,7 +342,13 @@ export function createStorage(storage: Browser.Storage.Static): WebExtStorage {
         return disposers.add(() => storage.onChanged.removeListener(onChanged))
       },
     }
-    areas[name] = facade(area, helpers)
+    const wrapped: StorageArea = facade(area, {
+      ...helpers,
+      namespace(namespace: string) {
+        return createNamespace(wrapped, namespace)
+      },
+    })
+    areas[name] = wrapped
   }
   return facade(storage, {
     ...areas,
