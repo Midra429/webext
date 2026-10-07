@@ -1,10 +1,12 @@
 import type Browser from 'webextension-polyfill'
 import type { MainWorldStorageBridgeOptions } from './main-world'
+import type { StorageMigrator } from './migrations'
 
 import { createDisposables } from '../disposables'
 import { UnsupportedOperationError } from '../errors'
 import { facade } from '../facade'
 import { createStorageBridge } from './main-world'
+import { createMigrationRunner } from './migrations'
 import { createNamespace, estimateBytes } from './namespace'
 
 /**
@@ -17,7 +19,7 @@ import { createNamespace, estimateBytes } from './namespace'
  * @see https://developer.chrome.com/docs/extensions/reference/api/storage
  * @see https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/storage
  */
-export interface StorageHelpers {
+export interface StorageHelpers extends StorageMigrator {
   /** 補完メソッドの実装方式。権限・領域へのアクセス可否を保証するものではありません。 */
   readonly capabilities: {
     /** `native` はネイティブ呼び出し、`polyfilled` は全値の取得によるキー列挙。 */
@@ -151,7 +153,8 @@ export type StorageArea = Omit<Browser.Storage.StorageArea, 'getBytesInUse'> &
 export type NamespacedStorageArea<
   Schema extends object | undefined = undefined,
 > = Schema extends object
-  ? TypedStorageMethods<Schema> & Pick<StorageHelpers, 'capabilities'>
+  ? TypedStorageMethods<Schema> &
+      Pick<StorageHelpers, 'capabilities' | 'migrate'>
   : StorageHelpers &
       Pick<Browser.Storage.StorageArea, 'get' | 'set' | 'remove' | 'clear'>
 
@@ -299,6 +302,12 @@ export function createStorage(
     })
     const helpers: StorageHelpers = {
       capabilities,
+      migrate: createMigrationRunner(
+        area,
+        () => wrapped,
+        '',
+        name !== 'managed'
+      ),
       async getKeys() {
         return area.getKeys ? area.getKeys() : Object.keys(await area.get(null))
       },
@@ -339,10 +348,10 @@ export function createStorage(
       namespace<Schema extends object | undefined = undefined>(
         namespace: string
       ): NamespacedStorageArea<Schema> {
-        return createNamespace(
-          wrapped,
-          namespace
-        ) as NamespacedStorageArea<Schema>
+        return createNamespace(wrapped, namespace, {
+          identity: area,
+          writable: name !== 'managed',
+        }) as NamespacedStorageArea<Schema>
       },
     })
     areas[name] = wrapped

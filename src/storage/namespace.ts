@@ -1,5 +1,7 @@
 import type { NamespacedStorageArea, StorageArea } from './index'
 
+import { createMigrationRunner } from './migrations'
+
 const encoder = new TextEncoder()
 
 /** @internal */
@@ -23,7 +25,8 @@ export function assertStorageNamespace(name: string): void {
 /** @internal */
 export function createNamespace(
   area: StorageArea,
-  name: string
+  name: string,
+  migration: { identity: object; writable: boolean }
 ): NamespacedStorageArea {
   assertStorageNamespace(name)
   const prefix = `${name}:`
@@ -50,8 +53,14 @@ export function createNamespace(
   const storedKeys = async () =>
     (await area.getKeys()).filter((key) => key.startsWith(prefix))
 
-  return {
+  const scoped: NamespacedStorageArea = {
     capabilities: area.capabilities,
+    migrate: createMigrationRunner(
+      migration.identity,
+      () => scoped,
+      prefix,
+      migration.writable
+    ),
     async get(keys = null) {
       const qualified =
         keys == null
@@ -99,4 +108,5 @@ export function createNamespace(
       return area.watch(qualify(key), listener)
     },
   }
+  return scoped
 }

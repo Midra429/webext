@@ -42,11 +42,11 @@ export interface MainWorldStorageOptions extends MainWorldOptions {
 /**
  * MAIN worldから操作する名前空間。値の転送はメッセージングと同じJSON制約です。
  * watchはローカル登録のみで、権限検証・現在値の通知は行いません。
- * 中継停止中の変更は再送しません。nativeイベント・同期capabilitiesは公開しません。
+ * 中継停止中の変更は再送しません。nativeイベント・同期capabilities・migrateは公開しません。
  */
 export type MainWorldStorageArea<
   Schema extends object | undefined = undefined,
-> = Omit<NamespacedStorageArea<Schema>, 'capabilities'> & {
+> = Omit<NamespacedStorageArea<Schema>, 'capabilities' | 'migrate'> & {
   /** 公開許可と領域の存在を確認し、補完方式を取得します。未許可なら拒否します。 */
   getCapabilities(): Promise<StorageHelpers['capabilities']>
 }

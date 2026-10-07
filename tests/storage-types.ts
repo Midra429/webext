@@ -1,3 +1,10 @@
+import type {
+  StorageMigration,
+  StorageMigrationContext,
+  StorageMigrationOptions,
+  StorageMigrationResult,
+  StorageMigrator,
+} from '../src'
 import type { NamespacedStorageArea, WebExtStorage } from '../src/storage'
 import type {
   MainWorldStorage,
@@ -116,4 +123,80 @@ export function storageTypes(storage: WebExtStorage, main: MainWorldStorage) {
     Promise<number | undefined>
   >()
   legacyMain.watch<string>('arbitrary', () => {})
+  migrationTypes(storage, main)
+}
+
+async function migrationTypes(storage: WebExtStorage, main: MainWorldStorage) {
+  const typed = storage.local.namespace<Settings>('settings')
+  const untyped = storage.local.namespace('legacy')
+  const options: StorageMigrationOptions = { versionKey: 'schema-version' }
+  const plan = [
+    {
+      version: 1,
+      async migrate(context) {
+        expectTypeOf(context).toEqualTypeOf<StorageMigrationContext>()
+        expectTypeOf(context.fromVersion).toEqualTypeOf<number>()
+        expectTypeOf(context.toVersion).toEqualTypeOf<number>()
+        const historical = await context.storage.getValue<number>('old-count')
+        expectTypeOf(historical).toEqualTypeOf<number | undefined>()
+        await context.storage.get(['old-count', 'old-theme'])
+        await context.storage.set({ 'old-count': 'historical format' })
+        await context.storage.setValue('old-theme', { previous: true })
+        await context.storage.remove(['old-count', 'old-theme'])
+        await context.storage.clear()
+        // @ts-expect-error 移行用APIから再帰的に移行は開始できない。
+        context.storage.migrate([])
+        // @ts-expect-error 移行用APIから別の名前空間には移動できない。
+        context.storage.namespace('other')
+      },
+    },
+    { version: 2, migrate: (_context: StorageMigrationContext) => {} },
+  ] as const satisfies readonly StorageMigration[]
+
+  for (const area of [storage.local, storage.sync, untyped, typed]) {
+    expectTypeOf(area.migrate).toEqualTypeOf<StorageMigrator['migrate']>()
+    expectTypeOf(area.migrate(plan, options)).toEqualTypeOf<
+      Promise<StorageMigrationResult>
+    >()
+  }
+  expectTypeOf(storage.managed.migrate([])).toEqualTypeOf<
+    Promise<StorageMigrationResult>
+  >()
+  if (storage.session)
+    expectTypeOf(storage.session.migrate(plan)).toEqualTypeOf<
+      Promise<StorageMigrationResult>
+    >()
+
+  const result = await typed.migrate(plan, options)
+  expectTypeOf(result.fromVersion).toEqualTypeOf<number>()
+  expectTypeOf(result.toVersion).toEqualTypeOf<number>()
+  expectTypeOf(result.appliedVersions).toEqualTypeOf<readonly number[]>()
+  // @ts-expect-error 結果の開始バージョンは読み取り専用。
+  result.fromVersion = 0
+  // @ts-expect-error 結果の終了バージョンは読み取り専用。
+  result.toVersion = 0
+  // @ts-expect-error 適用バージョンの配列も読み取り専用。
+  result.appliedVersions.push(3)
+  // @ts-expect-error 適用バージョンの配列を置き換えることもできない。
+  result.appliedVersions = []
+
+  // @ts-expect-error 移行内で旧キーを扱っても外側のスキーマは広がらない。
+  typed.getValue('old-count')
+  // @ts-expect-error 移行後もスキーマ外の保存は拒否する。
+  typed.setValue('old-theme', 'light')
+  // @ts-expect-error 移行後も定義済みキーの値型を維持する。
+  typed.set({ count: 'historical format' })
+  // @ts-expect-error バージョンキーは文字列のみ。
+  typed.migrate(plan, { versionKey: 123 })
+  // @ts-expect-error バージョンは数値のみ。
+  untyped.migrate([{ version: '1', migrate: () => {} }])
+  // @ts-expect-error コールバックの戻り値はvoidまたはPromise<void>。
+  storage.local.migrate([{ version: 1, migrate: async () => 123 }])
+
+  // @ts-expect-error MAIN worldの型付き名前空間には移行を公開しない。
+  main.local.namespace<Settings>('settings').migrate(plan)
+  // @ts-expect-error MAIN worldの型なし名前空間にも移行を公開しない。
+  main.local.namespace('legacy').migrate(plan)
+  // @ts-expect-error MAIN worldの領域ハンドル自体にも移行はない。
+  main.local.migrate(plan)
 }

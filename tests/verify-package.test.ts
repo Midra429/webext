@@ -143,20 +143,40 @@ export class UnsupportedOperationError extends Error {}
     )
     await writeFile(
       join(directory, 'dist/index.d.ts'),
-      `export interface NamespacedStorageArea<T> {
+      `export interface StorageMigrationResult {
+  readonly fromVersion: number
+  readonly toVersion: number
+  readonly appliedVersions: readonly number[]
+}
+export interface StorageMigration {
+  readonly version: number
+  readonly migrate: (context: {
+    storage: {
+      getValue<T>(key: string, fallback: T): Promise<T>
+      setValue<T>(key: string, value: T): Promise<void>
+      remove(keys: string | string[]): Promise<void>
+    }
+    readonly fromVersion: number
+    readonly toVersion: number
+  }) => void | Promise<void>
+}
+export interface StorageMigrator {
+  migrate(migrations: readonly StorageMigration[], options?: { versionKey?: string }): Promise<StorageMigrationResult>
+}
+export interface NamespacedStorageArea<T> extends StorageMigrator {
   getValue<K extends keyof T>(key: K): Promise<T[K] | undefined>
   getValue<K extends keyof T>(key: K, fallback: T[K]): Promise<T[K]>
   setValue<K extends keyof T>(key: K, value: T[K]): Promise<void>
 }
 export interface MainWorldStorage {
-  local: { namespace<T>(name: string): NamespacedStorageArea<T> }
+  local: { namespace<T>(name: string): Omit<NamespacedStorageArea<T>, 'migrate'> }
 }
 export interface MessageChannel<S> {
   send<K extends keyof S>(name: K, request: S[K] extends { request: infer R } ? R : never):
     Promise<S[K] extends { response: infer R } ? R : never>
 }
 export interface WebExt {
-  storage: MainWorldStorage
+  storage: { local: StorageMigrator & { namespace<T>(name: string): NamespacedStorageArea<T> } }
   messaging: { channel<S>(name: string): MessageChannel<S> }
 }
 export declare const webext: WebExt

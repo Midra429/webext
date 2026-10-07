@@ -34,6 +34,14 @@ export type {
   MainWorldStorageScope,
   StorageAreaName,
 } from './storage/main-world'
+export type {
+  StorageMigration,
+  StorageMigrationArea,
+  StorageMigrationContext,
+  StorageMigrationOptions,
+  StorageMigrationResult,
+  StorageMigrator,
+} from './storage/migrations'
 export type { WebExtTabs } from './tabs'
 
 export { createWebExt, webext } from './core'

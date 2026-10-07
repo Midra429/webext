@@ -298,6 +298,35 @@ test('MAIN storage rejects foreign window messages and malformed requests or cha
     await Promise.resolve()
     expect(env.set).not.toHaveBeenCalled()
     expect(receive).not.toHaveBeenCalled()
+    expect('migrate' in env.main.local.namespace('page')).toBe(false)
+    const responses: unknown[] = []
+    const collect = (event: MessageEvent) => {
+      if (event.data?.kind === 'response') responses.push(event.data.response)
+    }
+    env.options.window.addEventListener('message', collect)
+    try {
+      env.dispatch({
+        ...request,
+        message: {
+          ...request.message,
+          payload: { ...request.message.payload, operation: 'migrate' },
+        },
+      })
+      await Promise.resolve()
+      expect(responses).toContainEqual({
+        __webext_rpc__: 1,
+        ok: false,
+        error: {
+          name: 'TypeError',
+          message: 'Unknown MAIN world storage operation',
+        },
+      })
+      expect(env.get).not.toHaveBeenCalled()
+      expect(env.set).not.toHaveBeenCalled()
+      expect(env.remove).not.toHaveBeenCalled()
+    } finally {
+      env.options.window.removeEventListener('message', collect)
+    }
     // 同じページからの偽装は防げないが、未公開の名前空間へは到達できない。
     env.dispatch({
       ...request,

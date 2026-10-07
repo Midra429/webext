@@ -8,7 +8,7 @@ Chrome / Firefox の WebExtensions API を共通のインターフェースで�
 
 - **サイドパネル**：`webext.side` で Chrome / Firefox の操作を共通化。
 - **タブ取得・ポップアウト**：コンテンツスクリプト自身のタブ取得と、タブに関連付けた別ウィンドウの作成。
-- **ストレージ**：不足メソッドの補完、値の取得・保存、変更監視。明示的に公開した名前空間へのMAIN worldアクセス。
+- **ストレージ**：不足メソッドの補完、値の取得・保存、変更監視、バージョン付きデータ移行。明示的に公開した名前空間へのMAIN worldアクセス。
 - **型付きメッセージング**：チャンネルごとのリクエスト・レスポンスの型定義。MAIN worldとの双方向通信にも対応。
 - **メニュー**：`menus` で Firefox の `menus` / Chrome の `contextMenus` の差異を吸収。
 
@@ -22,6 +22,7 @@ Chrome / Firefox の WebExtensions API を共通のインターフェースで�
 - [タブ](#タブ)
 - [ポップアウト](#ポップアウト)
 - [ストレージ](#ストレージ)
+  - [バージョン付きデータ移行](#バージョン付きデータ移行)
   - [MAIN worldからのストレージ操作](#main-worldからのストレージ操作)
 - [型付きメッセージング](#型付きメッセージング)
 - [ネイティブ API と移行](#ネイティブ-api-と移行)
@@ -194,7 +195,7 @@ await settings.clear() // settings: のキーだけ削除。他の名前空間�
 
 名前空間はキーの整理用で、権限やクォータを分離しません。全件操作では領域全体の読み取りまたはキー列挙が必要で、`clear()` は列挙後に他のコンテキストで追加されたキーの削除を保証しません。監視は `webext.dispose()` でも解除できます。名前空間側には未加工のネイティブイベントを公開しません。
 
-従来の `webext.storage.local.setValue('theme', ...)` などは接頭辞なしのまま動作します。既存データの自動移行は行いません。ネイティブAPIで保存した `settings:theme` も同じ名前空間からアクセスできます。
+従来の `webext.storage.local.setValue('theme', ...)` などは接頭辞なしのまま動作します。既存データの自動移行は行いません。必要な移行は `migrate()` で明示的に実行してください。ネイティブAPIで保存した `settings:theme` も同じ名前空間からアクセスできます。
 
 - `getKeys()`：ネイティブ優先。補完時は `get(null)` で全値を読んでキーを取得。
 - `getBytesInUse(keys?)`：ネイティブ優先。補完時はキーとJSON化した値のUTF-8バイト数の合計。**推定値で、ディスク使用量やクォータ判定には使えません。**
@@ -239,6 +240,54 @@ settings.watch('fontSize', (value, previous) => {
 - スキーマはTypeScriptの型情報のみです。実行時検証、初期値の保存、古いデータの移行、スキーマ外のキーの除外は行いません。特にMAIN worldのページ側データを信頼する仕組みではありません。
 - 実データには別のバージョンやネイティブAPIが保存したキーもあり得るため、`getKeys()` は `string[]` のままです。
 - 型を指定しない `namespace(name)` と従来の `getValue<T>()` / `watch<T>()` はそのまま利用できます。型付きハンドルの公開型は `NamespacedStorageArea<Settings>` / `MainWorldStorageArea<Settings>` です。型定義にはTypeScript 5.4以降の `NoInfer` を使用しています。
+
+### バージョン付きデータ移行
+
+拡張コンテキストの領域と名前空間に `migrate(migrations, options?)` を提供します。保存済みバージョンより新しい段階だけを昇順で実行し、各段階の成功後にバージョンを保存します。ライブラリのインポート・初期化や拡張の更新だけでは実行されません。
+
+```ts
+interface Settings {
+  theme: 'system' | 'light' | 'dark'
+  fontSize: number
+}
+
+const settings = webext.storage.local.namespace<Settings>('settings')
+const result = await settings.migrate([
+  {
+    version: 1,
+    async migrate({ storage }) {
+      // 移行用storageは旧スキーマのキーも扱える、同じ名前空間の限定API。
+      // バージョン保存に失敗して再実行されても、移行済みのthemeを上書きしない。
+      if (await storage.getValue('theme') === undefined) {
+        const darkMode = await storage.getValue<boolean>('darkMode', false)
+        await storage.setValue('theme', darkMode ? 'dark' : 'system')
+      }
+      await storage.remove('darkMode')
+    },
+  },
+  {
+    version: 2,
+    async migrate({ storage, fromVersion, toVersion }) {
+      await storage.setValue('fontSize', await storage.getValue('fontSize', 16))
+      console.log(`${fromVersion} → ${toVersion}`)
+    },
+  },
+])
+// 未移行なら { fromVersion: 0, toVersion: 2, appliedVersions: [1, 2] }
+// 既に2なら { fromVersion: 2, toVersion: 2, appliedVersions: [] }
+```
+
+- 各段階は `{ version: number, migrate(context): void | Promise<void> }`。`version` は重複のない正の安全な整数です。連番でなくてもよく、入力順にかかわらず昇順で実行します。入力の配列・オブジェクトは変更しません。
+- `context` の `fromVersion` は直前に成功した保存バージョン、`toVersion` は今回の段階のバージョンです。返り値の `StorageMigrationResult` は呼び出し全体の開始・終了バージョンと、今回適用したバージョン一覧を返します。
+- 保存バージョンのキーは既定で `_webext_storage_version`。名前空間では `settings:_webext_storage_version` のように保存します。`migrate(migrations, { versionKey: 'schemaVersion' })` で変更できますが、既存データと衝突しないキーを選び、同じ移行では常に同じキーを使ってください。
+- 未保存のバージョンは `0`。保存値が非負の安全な整数でない場合は拒否します。保存値が移行一覧の最大バージョンより新しい場合も拒否し、ダウングレードしません。空配列は現在のバージョンを読むだけで書き込みません。
+- 移行用 `storage` は `get` / `set` / `remove` / `clear` / `getValue` / `setValue` のみを持ち、別の名前空間選択や再帰的な `migrate()` は公開しません。外側のハンドルを使って同じ進捗キーの移行をコールバック内から `await` することも、待機が循環するため避けてください。旧キーを扱えるようスキーマ型を制限しませんが、移行前後のデータの実行時検証は利用側の責任です。
+- 移行用 `storage` から進捗キーを直接書き換え・削除すると `TypeError`。その `clear()` は進捗キーだけを保持して他のキーを削除します。通常の外側のハンドルでは、進捗キーも `get()` / `getKeys()` の結果に含まれ、`clear()` で削除されます。進捗キーを通常操作で変更すると移行状態も変わるため、移行中は変更しないでください。
+- **トランザクション・自動ロールバックはありません。** コールバックやバージョンの保存に失敗すると、そのエラーでPromiseが拒否され、以降の段階は実行しません。成功済みの進捗と途中の書き込みは残ります。次回は未完了の段階を再実行するため、削除後の旧値を再利用しないなど、各段階を冪等にしてください。service workerの終了による中断も同じ前提です。
+- 同じネイティブ領域・実バージョンキーの移行は同じJS環境内で直列化します。別のラッパーや同名の名前空間ハンドルでも共有しますが、**別コンテキスト・別端末との排他は保証しません**。`sync` では別端末の書き込み・同期との競合も考慮してください。backgroundなど単一の書き込み元で実行し、完了してから通常の読み書きやMAIN worldへの公開を開始してください。backgroundのイベント登録自体は移行の完了を待たず同期的に行い、各ハンドラー内で移行の完了を待ってください。
+- `storage.dispose()` は実行中・待機中の移行を中止しません。読み取り専用の `managed` はコールバック実行前に `UnsupportedOperationError` で拒否します。MAIN worldには `migrate()` を公開しません。
+
+公開型は `StorageMigration` / `StorageMigrationContext` / `StorageMigrationArea` / `StorageMigrationOptions` / `StorageMigrationResult` / `StorageMigrator` です。
 
 ### MAIN worldからのストレージ操作
 
@@ -467,7 +516,7 @@ bun run build
 - `src/index.ts` / `src/core.ts`：公開エントリー、APIの組み立てと初期化。
 - `src/context.ts` / `src/paths.ts`：実行環境判定、拡張内URLの検証。
 - `src/tabs.ts` / `src/popout.ts` / `src/side.ts`：タブ取得、ポップアウト、サイドパネルのブラウザ差異の吸収。
-- `src/storage/`：`index.ts`にネイティブ領域のラッパーと公開型、`namespace.ts`に名前空間操作・検証・バイト数推定、`main-world.ts`にMAIN worldクライアントと限定公開ブリッジ。
+- `src/storage/`：`index.ts`にネイティブ領域のラッパーと公開型、`namespace.ts`に名前空間操作・検証・バイト数推定、`migrations.ts`にバージョン付き移行・進捗保護・実行待機管理、`main-world.ts`にMAIN worldクライアントと限定公開ブリッジ。
 - `src/messaging/`：`index.ts`を入口とし、`types.ts`に公開型、`factory.ts`にチャンネルの管理・ルーティング、`protocol.ts`に共通応答形式、`serialization.ts`にJSON検証、`transport.ts` / `window.ts`に送信・待機とDOM通信。
 - `src/disposables.ts` / `src/facade.ts`：解除処理の管理、ネイティブAPIを変更しないラッパー。
 - `scripts/verify-package.ts` / `scripts/fixtures/`：配布パッケージの検証と利用側のサンプル。

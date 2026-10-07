@@ -3,6 +3,8 @@ import type {
   MainWorldStorage,
   MessageChannel,
   NamespacedStorageArea,
+  StorageMigration,
+  StorageMigrationResult,
   WebExt,
 } from '@midra/webext'
 import {
@@ -28,6 +30,22 @@ export function consumer(api: WebExt, main: MainWorldStorage) {
     api.storage.local.namespace<Settings>('settings')
   const theme: Promise<Settings['theme'] | undefined> = scope.getValue('theme')
   const count: Promise<number> = scope.getValue('count', 0)
+  const migrations: readonly StorageMigration[] = [{
+    version: 1,
+    async migrate({ storage, fromVersion, toVersion }) {
+      const oldCount = await storage.getValue<number>('old-count', 0)
+      await storage.setValue('count', oldCount)
+      await storage.remove('old-count')
+      const versions: number[] = [fromVersion, toVersion]
+      void versions
+    },
+  }]
+  const migrated: Promise<StorageMigrationResult> = scope.migrate(migrations, {
+    versionKey: 'schema-version',
+  })
+  const migratedRoot: Promise<StorageMigrationResult> = api.storage.local.migrate(migrations)
+  // @ts-expect-error MAIN world must not advertise extension-side migrations.
+  main.local.namespace<Settings>('settings').migrate(migrations)
   scope.setValue('theme', 'dark')
   // @ts-expect-error A published schema must reject values of the wrong type.
   scope.setValue('count', 'wrong')
@@ -47,5 +65,5 @@ export function consumer(api: WebExt, main: MainWorldStorage) {
     RemoteError,
     UnsupportedOperationError,
   ]
-  return { theme, count, mainCount, response, singleton, options, storageOptions, messagingOptions, errors }
+  return { theme, count, migrated, migratedRoot, mainCount, response, singleton, options, storageOptions, messagingOptions, errors }
 }
