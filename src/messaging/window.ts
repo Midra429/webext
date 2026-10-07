@@ -2,7 +2,8 @@ import type { PendingResponse } from './transport'
 import type { MainWorldOptions, MessageSender } from './types'
 
 import { UnsupportedOperationError } from '../errors'
-import { encode, normalizeError } from './serialization'
+import { errorResponse } from './protocol'
+import { encode } from './serialization'
 
 type Side = 'main' | 'content'
 type Receive = (
@@ -11,10 +12,6 @@ type Receive = (
   target: unknown,
   respond: (response: unknown) => void
 ) => void
-
-export function errorResponse(error: unknown) {
-  return { __webext_rpc__: 1, ok: false, error: normalizeError(error) }
-}
 
 /** 同じフレームのDOM通信。namespace・送信元worldはページから偽装でき、認証には使えません。 */
 export function createWindowTransport(

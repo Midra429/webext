@@ -9,6 +9,10 @@ on:
         type: choice
         options: [major, minor, patch]
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -38,14 +42,6 @@ jobs:
           bun install --frozen-lockfile
           bun run validate
           bun run build
-
-      - name: package.jsonのexportsを更新
-        run: |
-          bun run scripts/generate-exports.ts
-          if ! git diff --quiet package.json; then
-            git add package.json
-            git commit -m "Update exports"
-          fi
 
       - name: バージョンを更新
         run: |

@@ -16,6 +16,46 @@ import { createWindowTransport } from '../src/messaging/window'
 interface Schema {
   echo: { request: unknown; response: unknown }
 }
+
+test('failed bridge registration releases DOM listeners and permits retry', () => {
+  const dom = page()
+  const failure = new Error('Listener registration failed')
+  const listeners = new Set<Listener>()
+  const addListener = mock((listener: Listener) => {
+    listeners.add(listener)
+  })
+  addListener.mockImplementationOnce(() => {
+    throw failure
+  })
+  const messaging = createMessaging(
+    {
+      runtime: {
+        id: 'test',
+        sendMessage: mock(async () => undefined),
+        onMessage: {
+          addListener,
+          removeListener: (listener: Listener) => listeners.delete(listener),
+        },
+      },
+    } as unknown as MessagingApi,
+    'content-script'
+  )
+  const options = { namespace: 'retry', channels: ['app'], window: dom.window }
+  try {
+    expect(() => messaging.bridgeMainWorld(options)).toThrow(failure)
+    expect(dom.listeners.size).toBe(0)
+    expect(listeners.size).toBe(0)
+    const stop = messaging.bridgeMainWorld(options)
+    expect(dom.listeners.size).toBe(1)
+    expect(listeners.size).toBe(1)
+    stop()
+    stop()
+    expect(dom.listeners.size).toBe(0)
+    expect(listeners.size).toBe(0)
+  } finally {
+    messaging.dispose()
+  }
+})
 type Listener = (
   message: unknown,
   sender: MessageSender,

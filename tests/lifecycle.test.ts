@@ -46,6 +46,13 @@ test('facades preserve native receivers and cache bindings without modifying the
   const getValue = wrapped.getValue
   expect(getValue()).toBe(7)
   expect(wrapped.getValue).toBe(getValue)
+  const descriptor = Object.getOwnPropertyDescriptor(wrapped, 'getValue')!
+  expect(descriptor.get?.()).toBe(getValue)
+  const copied = Object.defineProperties(
+    {},
+    Object.getOwnPropertyDescriptors(wrapped)
+  ) as typeof wrapped
+  expect(copied.getValue()).toBe(7)
   expect(wrapped[symbol]).toBe('symbol value')
   expect(Reflect.ownKeys(wrapped)).toContain(symbol)
   expect('getValue' in wrapped).toBe(true)
@@ -56,6 +63,8 @@ test('facades preserve native receivers and cache bindings without modifying the
   }
   expect(wrapped.getValue).not.toBe(getValue)
   expect(wrapped.getValue()).toBe(14)
+  expect(descriptor.get?.()).toBe(wrapped.getValue)
+  expect(copied.getValue()).toBe(14)
 })
 
 test('lazy facades initialize only once even when inspected before reading properties', () => {

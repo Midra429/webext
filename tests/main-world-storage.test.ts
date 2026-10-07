@@ -1,11 +1,10 @@
+import type { MainWorldStorageBridgeOptions } from '../src/storage/main-world'
+
 import { expect, mock, test } from 'bun:test'
 
-import {
-  MessageTimeoutError,
-  RemoteError,
-  createMainWorldStorage,
-} from '../src'
+import { MessageTimeoutError, RemoteError } from '../src/errors'
 import { createStorage } from '../src/storage'
+import { createMainWorldStorage } from '../src/storage/main-world'
 
 function setup() {
   const domListeners = new Set<(event: MessageEvent) => void>()
@@ -34,6 +33,14 @@ function setup() {
           } as unknown as MessageEvent)
       })
     },
+  }
+  const dispatch = (
+    data: unknown,
+    origin = window.location.origin,
+    source: unknown = window
+  ) => {
+    for (const listener of [...domListeners])
+      listener({ data, source, origin } as MessageEvent)
   }
   type Change = { oldValue?: unknown; newValue?: unknown }
   type Listener = (changes: Record<string, Change>, area: string) => void
@@ -105,15 +112,13 @@ function setup() {
     timeoutMs: 50,
   }
   const main = createMainWorldStorage(options)
-  const start = () =>
-    storage.bridgeMainWorld({
-      ...options,
-      scopes: [
-        { area: 'local', namespace: 'page', writable: true },
-        { area: 'sync', namespace: 'readonly' },
-        { area: 'managed', namespace: 'policy', writable: true },
-      ],
-    })
+  const start = (
+    scopes: MainWorldStorageBridgeOptions['scopes'] = [
+      { area: 'local', namespace: 'page', writable: true },
+      { area: 'sync', namespace: 'readonly' },
+      { area: 'managed', namespace: 'policy', writable: true },
+    ]
+  ) => storage.bridgeMainWorld({ ...options, scopes })
   return {
     storage,
     main,
@@ -126,6 +131,8 @@ function setup() {
     emit,
     domListeners,
     changes,
+    native,
+    dispatch,
     dispose() {
       main.dispose()
       storage.dispose()
@@ -222,6 +229,201 @@ test('MAIN storage enforces allowlists, read-only grants, JSON constraints and i
     ).rejects.toBeInstanceOf(RemoteError)
     expect(env.get).not.toHaveBeenCalled()
     expect(() => env.start()).toThrow('already registered')
+  } finally {
+    env.dispose()
+  }
+})
+
+test('MAIN storage rejects foreign window messages and malformed requests or changes', async () => {
+  const env = setup()
+  env.start()
+  const receive = mock((_value: unknown, _old: unknown) => {})
+  env.main.local.namespace('page').watch('theme', receive)
+  const request = {
+    __webext_window_rpc__: 1,
+    namespace: `${env.options.namespace}/storage`,
+    from: 'main',
+    id: 'forged',
+    kind: 'request',
+    target: 'content-script',
+    message: {
+      __webext_rpc__: 1,
+      channel: '@midra/webext/storage',
+      type: 'request',
+      empty: false,
+      payload: {
+        area: 'local',
+        namespace: 'page',
+        operation: 'set',
+        argument: { theme: 'dark' },
+      },
+    },
+  }
+  const notification = {
+    ...request,
+    from: 'content',
+    kind: 'notification',
+    sender: {},
+    message: {
+      ...request.message,
+      type: 'changed',
+      payload: {
+        area: 'local',
+        namespace: 'page',
+        changes: { theme: { newValue: 'dark' } },
+      },
+    },
+  }
+  try {
+    for (const message of [request, notification]) {
+      env.dispatch(message, 'https://attacker.example')
+      env.dispatch(message, env.options.window.location.origin, {})
+    }
+    for (const argument of [null, ['theme'], new Date()])
+      env.dispatch({
+        ...request,
+        message: {
+          ...request.message,
+          payload: { ...request.message.payload, argument },
+        },
+      })
+    for (const changes of [null, [], { theme: null }, { theme: [] }])
+      env.dispatch({
+        ...notification,
+        message: {
+          ...notification.message,
+          payload: { ...notification.message.payload, changes },
+        },
+      })
+    await Promise.resolve()
+    expect(env.set).not.toHaveBeenCalled()
+    expect(receive).not.toHaveBeenCalled()
+    // 同じページからの偽装は防げないが、未公開の名前空間へは到達できない。
+    env.dispatch({
+      ...request,
+      message: {
+        ...request.message,
+        payload: { ...request.message.payload, namespace: 'other' },
+      },
+    })
+    expect(env.set).not.toHaveBeenCalled()
+    env.dispatch(request)
+    await Promise.resolve()
+    expect(env.set).toHaveBeenCalledWith({ 'page:theme': 'dark' })
+    expect(receive).toHaveBeenCalledWith('dark', undefined)
+  } finally {
+    env.dispose()
+  }
+})
+
+test('MAIN storage rolls back a failed native listener registration', () => {
+  const env = setup()
+  const addListener = env.native.onChanged.addListener
+  const error = new Error('registration failed')
+  env.native.onChanged.addListener = () => {
+    throw error
+  }
+  try {
+    expect(() => env.start()).toThrow(error)
+    expect(env.changes.size).toBe(0)
+    expect(env.domListeners.size).toBe(1)
+    env.native.onChanged.addListener = addListener
+    expect(() => env.start()).not.toThrow()
+    expect(env.changes.size).toBe(1)
+    expect(env.domListeners.size).toBe(2)
+  } finally {
+    env.dispose()
+  }
+  expect(env.domListeners.size).toBe(0)
+})
+
+test('MAIN storage listener and error reporter failures do not stop other watchers', async () => {
+  const env = setup()
+  const error = new Error('watch failed')
+  const onError = mock(() => {
+    throw new Error('report failed')
+  })
+  const main = createMainWorldStorage({ ...env.options, onError })
+  env.start()
+  const area = main.local.namespace('page')
+  const receive = mock((_value: unknown, _old: unknown) => {})
+  area.watch('theme', () => {
+    throw error
+  })
+  area.watch('theme', receive)
+  try {
+    await area.setValue('theme', 'dark')
+    expect(onError).toHaveBeenCalledWith(error)
+    expect(receive).toHaveBeenCalledWith('dark', undefined)
+  } finally {
+    main.dispose()
+    env.dispose()
+  }
+})
+
+test('MAIN storage change forwarding reads each native change once across grants', async () => {
+  const env = setup()
+  env.start([
+    { area: 'local', namespace: 'page' },
+    { area: 'local', namespace: 'other' },
+    { area: 'sync', namespace: 'page' },
+  ])
+  const page = mock((_value: unknown, _old: unknown) => {})
+  const other = mock((_value: unknown, _old: unknown) => {})
+  const sync = mock((_value: unknown, _old: unknown) => {})
+  env.main.local.namespace('page').watch('theme:variant', page)
+  env.main.local.namespace('other').watch('__proto__', other)
+  env.main.sync.namespace('page').watch('theme:variant', sync)
+  const pageChange = mock(() => ({ newValue: 'dark' }))
+  const otherChange = mock(() => ({ newValue: false }))
+  const privateChange = mock(() => ({ newValue: 'secret' }))
+  try {
+    env.emit(
+      Object.defineProperties(
+        {},
+        {
+          'page:theme:variant': { enumerable: true, get: pageChange },
+          'other:__proto__': { enumerable: true, get: otherChange },
+          private: { enumerable: true, get: privateChange },
+        }
+      )
+    )
+    await Promise.resolve()
+    expect(pageChange).toHaveBeenCalledTimes(1)
+    expect(otherChange).toHaveBeenCalledTimes(1)
+    expect(privateChange).not.toHaveBeenCalled()
+    expect(page).toHaveBeenCalledWith('dark', undefined)
+    expect(other).toHaveBeenCalledWith(false, undefined)
+    expect(sync).not.toHaveBeenCalled()
+  } finally {
+    env.dispose()
+  }
+})
+
+test('MAIN storage stops forwarding immediately when onError disposes the bridge', async () => {
+  const env = setup()
+  let stop = () => {}
+  const onError = mock(() => stop())
+  stop = env.storage.bridgeMainWorld({
+    ...env.options,
+    scopes: [
+      { area: 'local', namespace: 'page' },
+      { area: 'local', namespace: 'other' },
+    ],
+    onError,
+  })
+  const receive = mock((_value: unknown, _old: unknown) => {})
+  env.main.local.namespace('other').watch('theme', receive)
+  try {
+    env.emit({
+      'page:theme': { newValue: new Date() },
+      'other:theme': { newValue: 'dark' },
+    })
+    await Promise.resolve()
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(receive).not.toHaveBeenCalled()
+    expect(env.changes.size).toBe(0)
+    expect(env.domListeners.size).toBe(1)
   } finally {
     env.dispose()
   }

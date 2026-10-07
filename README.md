@@ -434,11 +434,11 @@ Chrome / Firefox 向けの試験用拡張を生成できます。
 bun run demo:build
 ```
 
-読み込み方と操作手順は [demo/README.md](demo/README.md) を参照してください。example.com / example.org 上のMAIN world操作パネルでは、専用の `local.namespace('demo-main')` に対する読取・保存・削除・監視と、未公開スコープの拒否を試せます。通常のデモやメニュー記録の `demo` 名前空間はMAIN側に公開しません。
+読み込み方と操作手順は [デモのREADME](https://github.com/Midra429/webext/blob/main/demo/README.md) を参照してください。example.com / example.org 上のMAIN world操作パネルでは、専用の `local.namespace('demo-main')` に対する読取・保存・削除・監視と、未公開スコープの拒否を試せます。通常のデモやメニュー記録の `demo` 名前空間はMAIN側に公開しません。
 
 ## 開発
 
-依存関係をインストールしてから、必要なコマンドを実行してください。
+Bun・Node.js・npmが必要です。依存関係をインストールしてから、必要なコマンドを実行してください。
 
 ```sh
 bun install
@@ -453,23 +453,28 @@ bun run build
 | `bun run check:fix` | 書式・静的解析の自動修正（ファイルを書き換える） |
 | `bun run compile` | 型チェック |
 | `bun test` | 全テスト |
-| `bun run build` | ライブラリのビルド |
+| `bun run build` | ライブラリのビルドと配布内容の検証 |
+| `bun run verify-package` | ビルド済みパッケージの公開ファイル・利用側の型・ESM importの検証 |
 | `bun run demo:build` | デモ拡張のビルド |
+| `bun run gen-exports` | ビルド出力に合わせたexportsの更新（package.jsonを書き換える） |
 
-リリース用ワークフローでも、ビルド前に `validate` を実行します。
+リリース用ワークフローでも、ビルド前に `validate` を実行します。`build` は公開対象のファイルだけを一時的な利用側環境へコピーし、ソースのパスエイリアスを使わずに型チェック（`skipLibCheck: false`）とNode.jsでのESM importを検証します。一時ファイルは検証終了時に削除します。
+
+`npm pack` / `npm publish` でも `prepack` によって再ビルドと配布内容の検証を行うため、開発用依存関係が必要です。通常のビルド・検証では `package.json` を変更しません。公開エントリーを意図的に変更した場合は、`gen-exports` の差分も確認してください。
 
 ### ソース構成
 
-- `src/core.ts`：公開APIの組み立てと初期化。
+- `src/index.ts` / `src/core.ts`：公開エントリー、APIの組み立てと初期化。
 - `src/context.ts` / `src/paths.ts`：実行環境判定、拡張内URLの検証。
-- `src/tabs.ts` / `src/popout.ts`：タブ取得ブリッジ、ポップアウトの対象解決と作成。
-- `src/side.ts` / `src/storage.ts`：ブラウザ差異の吸収と共通ヘルパー。
-- `src/messaging/`：公開型、JSON検証、送信・待機処理、チャンネルのルーティング。
+- `src/tabs.ts` / `src/popout.ts` / `src/side.ts`：タブ取得、ポップアウト、サイドパネルのブラウザ差異の吸収。
+- `src/storage/`：`index.ts`にネイティブ領域のラッパーと公開型、`namespace.ts`に名前空間操作・検証・バイト数推定、`main-world.ts`にMAIN worldクライアントと限定公開ブリッジ。
+- `src/messaging/`：`index.ts`を入口とし、`types.ts`に公開型、`factory.ts`にチャンネルの管理・ルーティング、`protocol.ts`に共通応答形式、`serialization.ts`にJSON検証、`transport.ts` / `window.ts`に送信・待機とDOM通信。
 - `src/disposables.ts` / `src/facade.ts`：解除処理の管理、ネイティブAPIを変更しないラッパー。
+- `scripts/verify-package.ts` / `scripts/fixtures/`：配布パッケージの検証と利用側のサンプル。
 - `demo/src/operations.ts`：ユーザー操作を維持した実行と、ボタンごとの実行中状態の管理。
 
 ネイティブメッセージの受信リスナーは `createWebExt()` のインスタンスごとに1つを共有し、handlerまたはMAIN world中継が存在する間だけ登録します。ストレージの監視とactionクリックの解除関数は、繰り返し呼んでも解除処理を重複実行しません。
 
 ### 検証範囲
 
-テストでは API のモックによる動作・境界条件・解除処理と、公開用スクリプトの出力を確認します。実際の表示・ユーザー操作の有効期間・権限は、ブラウザでの確認が必要です。
+テストではAPIのモックによる動作・境界条件・解除処理・リスナー登録失敗時の後始末と、公開用スクリプトの出力を確認します。ビルド後は実際の配布ファイルと型宣言も検証します。実際の表示・ユーザー操作の有効期間・権限は、ブラウザでの確認が必要です。

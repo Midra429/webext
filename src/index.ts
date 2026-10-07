@@ -3,14 +3,6 @@
 export type { WebExtContext } from './context'
 export type { CreateWebExtOptions, WebExt } from './core'
 export type {
-  MainWorldStorage,
-  MainWorldStorageArea,
-  MainWorldStorageBridgeOptions,
-  MainWorldStorageOptions,
-  MainWorldStorageScope,
-  StorageAreaName,
-} from './main-world-storage'
-export type {
   MainWorldBridgeOptions,
   MainWorldMessaging,
   MainWorldOptions,
@@ -34,6 +26,14 @@ export type {
   StorageHelpers,
   WebExtStorage,
 } from './storage'
+export type {
+  MainWorldStorage,
+  MainWorldStorageArea,
+  MainWorldStorageBridgeOptions,
+  MainWorldStorageOptions,
+  MainWorldStorageScope,
+  StorageAreaName,
+} from './storage/main-world'
 export type { WebExtTabs } from './tabs'
 
 export { createWebExt, webext } from './core'
@@ -42,5 +42,5 @@ export {
   RemoteError,
   UnsupportedOperationError,
 } from './errors'
-export { createMainWorldStorage } from './main-world-storage'
 export { createMainWorldMessaging } from './messaging'
+export { createMainWorldStorage } from './storage/main-world'

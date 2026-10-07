@@ -77,6 +77,7 @@ test('storage helpers retain falsy values, defaults and UTF-8 byte estimates', a
   expect(await storage.local.getBytesInUse(['count', 'flag'])).toBe(15)
   expect(get).toHaveBeenLastCalledWith(['count', 'flag'])
   expect(storage.session).toBeUndefined()
+  expect(await storage.local.getValue('__proto__', 'default')).toBe('default')
   await storage.local.setValue('__proto__', 'data')
   expect(set.mock.calls[0]?.[0]).toEqual({ ['__proto__']: 'data' })
 })
@@ -156,6 +157,56 @@ test('namespaces qualify keys and isolate reads, defaults, byte estimates and de
   expect(await settings.getBytesInUse(null)).toBe(0)
   expect(await other.get()).toEqual({ theme: 'light' })
   expect(await storage.local.getValue<string>('greeting')).toBe('日本語')
+})
+
+test('namespace fallback byte counts read the area only once', async () => {
+  const { storage, get } = storageApi()
+  const settings = storage.local.namespace('settings')
+  await settings.set({ theme: 'dark', count: 0 })
+  get.mockClear()
+  expect(await settings.getBytesInUse()).toBe(35)
+  expect(get).toHaveBeenCalledTimes(1)
+  expect(get).toHaveBeenLastCalledWith(null)
+  get.mockClear()
+  expect(await settings.getBytesInUse(null)).toBe(35)
+  expect(get).toHaveBeenCalledTimes(1)
+})
+
+test('namespaces preserve native byte counts, method receivers and read-only errors', async () => {
+  const getKeys = mock(async function (this: unknown) {
+    expect(this).toBe(native)
+    return ['settings:theme', 'other:theme']
+  })
+  const getBytesInUse = mock(async function (
+    this: unknown,
+    _keys?: string | string[] | null
+  ) {
+    expect(this).toBe(native)
+    return 123
+  })
+  const error = new Error('read-only')
+  const remove = mock(async (_keys: string | string[]) => {
+    throw error
+  })
+  const native = { getKeys, getBytesInUse, remove }
+  const storage = createStorage({
+    local: native,
+    managed: native,
+  } as unknown as Parameters<typeof createStorage>[0])
+  const settings = storage.local.namespace('settings')
+  expect(settings.capabilities).toBe(storage.local.capabilities)
+  expect(Object.isFrozen(settings.capabilities)).toBe(true)
+  expect(settings.capabilities).toEqual({
+    getKeys: 'native',
+    getBytesInUse: 'native',
+  })
+  expect(await settings.getKeys()).toEqual(['theme'])
+  expect(await settings.getBytesInUse()).toBe(123)
+  expect(getBytesInUse).toHaveBeenLastCalledWith(['settings:theme'])
+  expect(await settings.getBytesInUse([])).toBe(123)
+  expect(getBytesInUse).toHaveBeenLastCalledWith([])
+  await expect(storage.managed.namespace('empty').clear()).rejects.toBe(error)
+  expect(remove).toHaveBeenCalledWith([])
 })
 
 test('namespace watches share disposal and reject other namespaces or areas', () => {

@@ -1,0 +1,51 @@
+// Copied to package-types.ts for isolated, post-build compilation only.
+import type {
+  MainWorldStorage,
+  MessageChannel,
+  NamespacedStorageArea,
+  WebExt,
+} from '@midra/webext'
+import {
+  createMainWorldMessaging,
+  createMainWorldStorage,
+  createWebExt,
+  MessageTimeoutError,
+  RemoteError,
+  UnsupportedOperationError,
+  webext,
+} from '@midra/webext'
+
+interface Settings {
+  theme: 'light' | 'dark'
+  count: number
+}
+interface Messages {
+  echo: { request: string; response: string }
+}
+
+export function consumer(api: WebExt, main: MainWorldStorage) {
+  const scope: NamespacedStorageArea<Settings> =
+    api.storage.local.namespace<Settings>('settings')
+  const theme: Promise<Settings['theme'] | undefined> = scope.getValue('theme')
+  const count: Promise<number> = scope.getValue('count', 0)
+  scope.setValue('theme', 'dark')
+  // @ts-expect-error A published schema must reject values of the wrong type.
+  scope.setValue('count', 'wrong')
+  const mainCount: Promise<number> = main.local
+    .namespace<Settings>('settings')
+    .getValue('count', 0)
+  const channel: MessageChannel<Messages> = api.messaging.channel<Messages>('consumer')
+  const response: Promise<string> = channel.send('echo', 'hello')
+  // @ts-expect-error Published messaging must retain the request type.
+  channel.send('echo', 123)
+  const singleton: WebExt = webext
+  const options: Parameters<typeof createWebExt>[0] = { context: 'background' }
+  const storageOptions: Parameters<typeof createMainWorldStorage>[0] = { namespace: 'consumer' }
+  const messagingOptions: Parameters<typeof createMainWorldMessaging>[0] = { namespace: 'consumer' }
+  const errors: (new (...args: never[]) => Error)[] = [
+    MessageTimeoutError,
+    RemoteError,
+    UnsupportedOperationError,
+  ]
+  return { theme, count, mainCount, response, singleton, options, storageOptions, messagingOptions, errors }
+}

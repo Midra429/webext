@@ -13,7 +13,9 @@
   },
   "scripts": {
     "prebuild": "bun run --shell bun clean",
-    "build": "tsdown",
+    "build": "tsdown && bun run verify-package",
+    "prepack": "bun run build",
+    "verify-package": "bun run scripts/verify-package.ts",
     "demo:build": "bun run demo/build.ts",
     "clean": "rm -rf dist",
     "test": "bun test",

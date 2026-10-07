@@ -1,9 +1,8 @@
+import type { NamespacedStorageArea, WebExtStorage } from '../src/storage'
 import type {
   MainWorldStorage,
   MainWorldStorageArea,
-  NamespacedStorageArea,
-  WebExtStorage,
-} from '../src'
+} from '../src/storage/main-world'
 
 import { expectTypeOf } from 'bun:test'
 

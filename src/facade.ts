@@ -5,17 +5,21 @@ export function facade<T extends object, Extra extends object>(
 ): T & Extra {
   const target = Object.assign(Object.create(null), extra) as T & Extra
   const bound = new Map<PropertyKey, { original: Function; value: Function }>()
+  const getNative = (key: PropertyKey) => {
+    const value = Reflect.get(native, key, native)
+    if (typeof value !== 'function') return value
+    let entry = bound.get(key)
+    if (!entry || entry.original !== value) {
+      entry = { original: value, value: value.bind(native) }
+      bound.set(key, entry)
+    }
+    return entry.value
+  }
   return new Proxy(target, {
     get(target, key, receiver) {
-      if (Object.hasOwn(target, key)) return Reflect.get(target, key, receiver)
-      const value = Reflect.get(native, key, native)
-      if (typeof value !== 'function') return value
-      let entry = bound.get(key)
-      if (!entry || entry.original !== value) {
-        entry = { original: value, value: value.bind(native) }
-        bound.set(key, entry)
-      }
-      return entry.value
+      return Object.hasOwn(target, key)
+        ? Reflect.get(target, key, receiver)
+        : getNative(key)
     },
     has(target, key) {
       return Reflect.has(target, key) || Reflect.has(native, key)
@@ -32,7 +36,7 @@ export function facade<T extends object, Extra extends object>(
           ? {
               configurable: true,
               enumerable: true,
-              get: () => Reflect.get(native, key, native),
+              get: () => getNative(key),
             }
           : undefined)
       )

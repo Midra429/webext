@@ -145,6 +145,29 @@ test('channel disposal and stale one-shot stops leave other and recreated channe
   }
 })
 
+test('failed native listener registration rolls back handlers and permits retry', async () => {
+  const { api, runtime, listeners } = bus()
+  const messaging = createMessaging(api)
+  const channel = messaging.channel<Schema>('app')
+  const failure = new Error('Listener registration failed')
+  runtime.onMessage.addListener.mockImplementationOnce(() => {
+    throw failure
+  })
+  const handler = mock((value: unknown) => value)
+  try {
+    expect(() => channel.handle('echo', handler)).toThrow(failure)
+    expect(listeners.size).toBe(0)
+    const stop = channel.handle('echo', handler)
+    expect(listeners.size).toBe(1)
+    expect(await channel.send('echo', 'retry')).toBe('retry')
+    expect(handler).toHaveBeenCalledTimes(1)
+    stop()
+    expect(listeners.size).toBe(0)
+  } finally {
+    messaging.dispose()
+  }
+})
+
 test('factory disposal is terminal for cached and send-only channels', async () => {
   const { api, runtime, listeners } = bus()
   const messaging = createMessaging(api)
@@ -190,6 +213,8 @@ test('unregistered, malformed and external messages return false without capturi
       { ...request, channel: 1 },
       { ...request, type: 'unregistered' },
       { ...request, type: 1 },
+      { ...request, empty: undefined },
+      { ...request, empty: 'true' },
     ]) {
       expect(listener(message, { id: 'test' }, respond)).toBe(false)
     }

@@ -1,15 +1,16 @@
 import type Browser from 'webextension-polyfill'
-import type { MainWorldOptions } from './messaging'
+import type { MainWorldOptions } from '../messaging'
 import type {
   NamespacedStorageArea,
   StorageArea,
   StorageHelpers,
-} from './storage'
+} from './index'
 
-import { UnsupportedOperationError } from './errors'
-import { encode } from './messaging/serialization'
-import { sendMessage } from './messaging/transport'
-import { createWindowTransport, errorResponse } from './messaging/window'
+import { UnsupportedOperationError } from '../errors'
+import { errorResponse, successResponse } from '../messaging/protocol'
+import { sendMessage } from '../messaging/transport'
+import { createWindowTransport } from '../messaging/window'
+import { assertStorageNamespace } from './namespace'
 
 /** ストレージの実領域名。MAIN worldのハンドルは領域の利用可否を保証しません。 */
 export type StorageAreaName = 'local' | 'sync' | 'managed' | 'session'
@@ -93,11 +94,11 @@ function report(
   }
 }
 
-function record(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function keys(value: unknown): value is string | string[] {
+function isStorageKeys(value: unknown): value is string | string[] {
   return (
     typeof value === 'string' ||
     (Array.isArray(value) && value.every((key) => typeof key === 'string'))
@@ -126,7 +127,7 @@ export function createStorageBridge(
   >()
   for (const scope of options.scopes) {
     if (
-      !record(scope) ||
+      !isRecord(scope) ||
       !AREA_NAMES.includes(scope.area as StorageAreaName) ||
       (scope.writable !== undefined && typeof scope.writable !== 'boolean')
     )
@@ -161,7 +162,7 @@ export function createStorageBridge(
             throw new TypeError('Invalid MAIN world storage request')
           const request = message.payload
           if (
-            !record(request) ||
+            !isRecord(request) ||
             typeof request.area !== 'string' ||
             typeof request.namespace !== 'string' ||
             typeof request.operation !== 'string'
@@ -176,17 +177,21 @@ export function createStorageBridge(
           let value: unknown
           switch (operation) {
             case 'get':
-              if (argument != null && !keys(argument) && !record(argument))
+              if (
+                argument != null &&
+                !isStorageKeys(argument) &&
+                !isRecord(argument)
+              )
                 throw new TypeError('Invalid storage get keys')
               value = await scoped.get(argument ?? null)
               break
             case 'set':
-              if (!record(argument))
+              if (!isRecord(argument))
                 throw new TypeError('Storage items must be an object')
               await scoped.set(argument)
               break
             case 'remove':
-              if (!keys(argument))
+              if (!isStorageKeys(argument))
                 throw new TypeError('Invalid storage remove keys')
               await scoped.remove(argument)
               break
@@ -197,7 +202,7 @@ export function createStorageBridge(
               value = await scoped.getKeys()
               break
             case 'getBytesInUse':
-              if (argument != null && !keys(argument))
+              if (argument != null && !isStorageKeys(argument))
                 throw new TypeError('Invalid storage byte count keys')
               value = await scoped.getBytesInUse(argument ?? null)
               break
@@ -207,13 +212,7 @@ export function createStorageBridge(
             default:
               throw new TypeError('Unknown MAIN world storage operation')
           }
-          if (!stopped)
-            respond({
-              __webext_rpc__: 1,
-              ok: true,
-              value: encode(value),
-              empty: value === undefined,
-            })
+          if (!stopped) respond(successResponse(value))
         } catch (error) {
           if (!stopped) respond(errorResponse(error))
         }
@@ -225,15 +224,27 @@ export function createStorageBridge(
     areaName: string
   ) => {
     if (stopped) return
-    for (const grant of grants.values()) {
-      if (grant.area !== areaName) continue
-      const prefix = `${grant.namespace}:`
-      const filtered = Object.fromEntries(
-        Object.entries(changes)
-          .filter(([key]) => key.startsWith(prefix))
-          .map(([key, value]) => [key.slice(prefix.length), value])
-      )
-      if (!Object.keys(filtered).length) continue
+    const scopedChanges = new Map<
+      string,
+      [string, Browser.Storage.StorageChange][]
+    >()
+    // 名前空間にコロンを許可しないため、変更を一度だけ走査して公開先を特定できる。
+    for (const key of Object.keys(changes)) {
+      const separator = key.indexOf(':')
+      if (separator < 0) continue
+      const id = scopeId(areaName, key.slice(0, separator))
+      if (!grants.has(id)) continue
+      let entries = scopedChanges.get(id)
+      if (!entries) {
+        entries = []
+        scopedChanges.set(id, entries)
+      }
+      entries.push([key.slice(separator + 1), changes[key]!])
+    }
+    for (const [id, grant] of grants) {
+      if (stopped) break
+      const entries = scopedChanges.get(id)
+      if (!entries) continue
       try {
         endpoint.notify({
           __webext_rpc__: 1,
@@ -243,7 +254,7 @@ export function createStorageBridge(
           payload: {
             area: grant.area,
             namespace: grant.namespace,
-            changes: filtered,
+            changes: Object.fromEntries(entries),
           },
         })
       } catch (error) {
@@ -288,10 +299,10 @@ export function createMainWorldStorage(
         return
       const payload = message.payload
       if (
-        !record(payload) ||
+        !isRecord(payload) ||
         typeof payload.area !== 'string' ||
         typeof payload.namespace !== 'string' ||
-        !record(payload.changes)
+        !isRecord(payload.changes)
       )
         return
       const changes = payload.changes
@@ -301,7 +312,7 @@ export function createMainWorldStorage(
         if (!entries?.has(watcher) || !Object.hasOwn(changes, watcher.key))
           continue
         const change = changes[watcher.key]
-        if (!record(change)) continue
+        if (!isRecord(change)) continue
         try {
           watcher.listener(change.newValue, change.oldValue)
         } catch (error) {
@@ -316,14 +327,7 @@ export function createMainWorldStorage(
       {
         namespace(name: string): MainWorldStorageArea {
           if (disposed) throw new Error('MAIN world storage is disposed')
-          if (
-            typeof name !== 'string' ||
-            name.length === 0 ||
-            name.includes(':')
-          )
-            throw new TypeError(
-              'Storage namespace must be non-empty and contain no colon'
-            )
+          assertStorageNamespace(name)
           const request = <T>(
             operation: string,
             argument?: unknown

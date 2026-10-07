@@ -1,10 +1,11 @@
 import type Browser from 'webextension-polyfill'
-import type { MainWorldStorageBridgeOptions } from './main-world-storage'
+import type { MainWorldStorageBridgeOptions } from './main-world'
 
-import { createDisposables } from './disposables'
-import { UnsupportedOperationError } from './errors'
-import { facade } from './facade'
-import { createStorageBridge } from './main-world-storage'
+import { createDisposables } from '../disposables'
+import { UnsupportedOperationError } from '../errors'
+import { facade } from '../facade'
+import { createStorageBridge } from './main-world'
+import { createNamespace, estimateBytes } from './namespace'
 
 /**
  * 利用可能なストレージ領域に追加する共通ヘルパー。
@@ -272,88 +273,6 @@ type NativeArea = Omit<
 > & {
   getKeys?(): Promise<string[]>
   getBytesInUse?(keys?: string | string[] | null): Promise<number>
-}
-
-const encoder = new TextEncoder()
-
-function estimateBytes(values: Record<string, unknown>): number {
-  let bytes = 0
-  for (const key of Object.keys(values)) {
-    bytes += encoder.encode(key).byteLength
-    bytes += encoder.encode(JSON.stringify(values[key])).byteLength
-  }
-  return bytes
-}
-
-function createNamespace(
-  area: StorageArea,
-  name: string
-): NamespacedStorageArea {
-  if (typeof name !== 'string' || name.length === 0 || name.includes(':'))
-    throw new TypeError(
-      'Storage namespace must be non-empty and contain no colon'
-    )
-  const prefix = `${name}:`
-  const qualify = (key: string) => {
-    if (typeof key !== 'string')
-      throw new TypeError('Storage key must be a string')
-    return `${prefix}${key}`
-  }
-  const qualifyKeys = (keys: string | string[]) =>
-    Array.isArray(keys) ? keys.map(qualify) : qualify(keys)
-  const encode = (items: Record<string, unknown>) =>
-    Object.fromEntries(
-      Object.entries(items).map(([key, value]) => [qualify(key), value])
-    )
-  const decode = (items: Record<string, unknown>) =>
-    Object.fromEntries(
-      Object.entries(items)
-        .filter(([key]) => key.startsWith(prefix))
-        .map(([key, value]) => [key.slice(prefix.length), value])
-    )
-  const storedKeys = async () =>
-    (await area.getKeys()).filter((key) => key.startsWith(prefix))
-
-  return {
-    capabilities: area.capabilities,
-    async get(keys = null) {
-      const qualified =
-        keys == null
-          ? null
-          : typeof keys === 'string' || Array.isArray(keys)
-            ? qualifyKeys(keys)
-            : encode(keys)
-      return decode(await area.get(qualified))
-    },
-    async set(items) {
-      await area.set(encode(items))
-    },
-    async remove(keys) {
-      await area.remove(qualifyKeys(keys))
-    },
-    async clear() {
-      const keys = await storedKeys()
-      // 読み取り専用領域では空の名前空間でもネイティブの拒否を伝播させる。
-      await area.remove(keys)
-    },
-    async getKeys() {
-      return (await storedKeys()).map((key) => key.slice(prefix.length))
-    },
-    async getBytesInUse(keys = null) {
-      return area.getBytesInUse(
-        keys == null ? await storedKeys() : qualifyKeys(keys)
-      )
-    },
-    async getValue<T>(key: string, defaultValue?: T): Promise<T> {
-      return area.getValue(qualify(key), defaultValue as T)
-    },
-    async setValue(key, value) {
-      await area.setValue(qualify(key), value)
-    },
-    watch(key, listener) {
-      return area.watch(qualify(key), listener)
-    },
-  }
 }
 
 /**
