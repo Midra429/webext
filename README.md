@@ -8,7 +8,7 @@ Chrome / Firefox の WebExtensions API を共通のインターフェースで�
 
 - **サイドパネル**：`webext.side` で Chrome / Firefox の操作を共通化。
 - **タブ取得・ポップアウト**：コンテンツスクリプト自身のタブ取得と、タブに関連付けた別ウィンドウの作成。
-- **ストレージ**：不足メソッドの補完、値の取得・保存、変更監視。
+- **ストレージ**：不足メソッドの補完、値の取得・保存、変更監視。明示的に公開した名前空間へのMAIN worldアクセス。
 - **型付きメッセージング**：チャンネルごとのリクエスト・レスポンスの型定義。MAIN worldとの双方向通信にも対応。
 - **メニュー**：`menus` で Firefox の `menus` / Chrome の `contextMenus` の差異を吸収。
 
@@ -22,6 +22,7 @@ Chrome / Firefox の WebExtensions API を共通のインターフェースで�
 - [タブ](#タブ)
 - [ポップアウト](#ポップアウト)
 - [ストレージ](#ストレージ)
+  - [MAIN worldからのストレージ操作](#main-worldからのストレージ操作)
 - [型付きメッセージング](#型付きメッセージング)
 - [ネイティブ API と移行](#ネイティブ-api-と移行)
 - [デモ拡張](#デモ拡張)
@@ -202,6 +203,117 @@ await settings.clear() // settings: のキーだけ削除。他の名前空間�
 - `watch()`：値の変更・削除を監視。削除時は `undefined`。解除関数を返し、`webext.dispose()` でも解除。
 - `getValue<T>()` の型指定は実行時検証ではありません。保存データの検証が必要なら利用側で行ってください。
 
+### キーと値の型を定義する
+
+`namespace<Schema>(name)` にキーと値の対応を定義したinterfaceまたはtypeを指定できます。拡張コンテキストとMAIN worldで同じスキーマを共有できます。
+
+```ts
+interface Settings {
+  theme: 'system' | 'light' | 'dark'
+  fontSize: number
+  enabled: boolean
+}
+
+const settings = webext.storage.local.namespace<Settings>('settings')
+// MAIN worldでは storage.local.namespace<Settings>('settings')
+
+await settings.setValue('theme', 'dark')
+const theme = await settings.getValue('theme') // Settings['theme'] | undefined
+const fontSize = await settings.getValue('fontSize', 16) // number
+await settings.set({ fontSize: 18, enabled: true })
+const selected = await settings.get(['theme', 'fontSize']) // Partial<Pick<Settings, 'theme' | 'fontSize'>>
+const defaults = await settings.get({ fontSize: 16 }) // { fontSize: number }
+const all = await settings.get() // Partial<Settings>
+settings.watch('fontSize', (value, previous) => {
+  // value / previous は number | undefined（未保存・削除を含む）
+})
+
+// 以下は型エラー:
+// settings.setValue('theme', 123)
+// settings.getValue('unknown')
+// settings.set({ fontSize: 'large' })
+```
+
+- キーの補完・保存値・既定値・取得結果・監視値の型がスキーマから決まります。`remove()` / `getBytesInUse()` の指定キーにも適用されます。
+- 未保存の可能性があるため、既定値なしの `getValue()` は `undefined` を含み、`get()` の結果のプロパティは任意です。既定値はスキーマの値型に従い、省略可能な値に既定値を渡した場合も保存済みの `null` は保持します。
+- スキーマはTypeScriptの型情報のみです。実行時検証、初期値の保存、古いデータの移行、スキーマ外のキーの除外は行いません。特にMAIN worldのページ側データを信頼する仕組みではありません。
+- 実データには別のバージョンやネイティブAPIが保存したキーもあり得るため、`getKeys()` は `string[]` のままです。
+- 型を指定しない `namespace(name)` と従来の `getValue<T>()` / `watch<T>()` はそのまま利用できます。型付きハンドルの公開型は `NamespacedStorageArea<Settings>` / `MainWorldStorageArea<Settings>` です。型定義にはTypeScript 5.4以降の `NoInfer` を使用しています。
+
+### MAIN worldからのストレージ操作
+
+MAIN worldでは `chrome` / `browser` の拡張APIを使えません。`createMainWorldStorage()` は同じフレームのISOLATED worldコンテンツスクリプトを経由して、**明示的に公開した領域・データ名前空間だけ**を操作します。ストレージ全体や任意のネイティブAPIは公開しません。
+
+```ts
+// ISOLATED worldのコンテンツスクリプト
+import { webext } from '@midra/webext'
+
+const stopBridge = webext.storage.bridgeMainWorld({
+  namespace: 'my-extension/storage-world', // 通信用（MAIN側と一致させる）
+  scopes: [
+    { area: 'local', namespace: 'page-settings', writable: true },
+    { area: 'sync', namespace: 'preferences' }, // 既定は読取専用
+  ],
+  onError: (error: unknown) => console.error(error),
+})
+
+window.addEventListener('pagehide', () => {
+  stopBridge()
+  webext.dispose()
+}, { once: true })
+```
+
+```ts
+// MAIN worldの別エントリーポイント（利用側でバンドル・注入）
+import { createMainWorldStorage } from '@midra/webext'
+
+const storage = createMainWorldStorage({
+  namespace: 'my-extension/storage-world',
+  timeoutMs: 5_000,
+})
+const settings = storage.local.namespace('page-settings')
+
+// 以下の要求はコンテンツスクリプトの中継登録後に実行する。
+const capabilities = await settings.getCapabilities() // 非同期。capabilitiesプロパティではない
+const theme = await settings.getValue<string>('theme', 'system')
+await settings.setValue<string>('theme', 'dark')
+const stopWatch = settings.watch<string>('theme', (value, previous) => {
+  console.log(previous, value) // 削除時はvalueがundefined
+})
+await settings.set({ theme: 'light', fontSize: 16 })
+const values = await settings.get({ theme: 'system' })
+const keys = await settings.getKeys()
+const bytes = await settings.getBytesInUse()
+await settings.remove('fontSize')
+await settings.clear() // page-settings: のキーだけ削除（非アトミック）
+
+window.addEventListener('pagehide', () => {
+  stopWatch()
+  storage.dispose()
+}, { once: true })
+```
+
+#### APIと公開範囲
+
+- `createMainWorldStorage({ namespace: string, window?: Window, timeoutMs?: number, onError?: (error: unknown) => void })` → `MainWorldStorage`。`local` / `sync` / `managed` / `session` の4領域のハンドルと `dispose()` を提供します。
+- 各領域の `.namespace(name)` が返すスコープでは `get()` / `set()` / `remove()` / `clear()` / `getKeys()` / `getBytesInUse()` / `getValue<T>(key, default?)` / `setValue<T>(key, value)` / `watch<T>(key, callback)` / **`await getCapabilities()`** を利用できます。キーや既定値の辞書は接頭辞なしで指定します。
+- `webext.storage.bridgeMainWorld({ namespace: string, window?: Window, scopes: readonly { area: 'local' | 'sync' | 'managed' | 'session', namespace: string, writable?: boolean }[], onError?: (error: unknown) => void })` → 中継の停止関数。
+- 通信用の `namespace` は両worldで同じ値にし、データ用の `scopes[].namespace` / `.namespace(name)` とは区別してください。通信名は空文字・空白のみを禁止し、データ名前空間は空文字・`:` を含む値を禁止します。`window` を省略すると現在のWindowを使います。
+- `scopes` に列挙した領域・データ名前空間の組だけを公開します。`writable` の既定値は `false`。書き込みを許可しない場合、`set` / `setValue` / `remove` / `clear` は拒否されます。`managed` は `writable: true` を指定しても常に読取専用です。
+- 4領域のハンドルがあることは利用可能性の保証ではありません。未公開の領域・スコープへの操作と `getCapabilities()` は拒否されます。中継側でも権限・ブラウザ対応に依存し、コンテンツスクリプトから利用できない `session` は非対応のままです。backgroundへのリレーや代替領域はありません。
+- `getCapabilities()` は中継経由の非同期問い合わせです。`getKeys` の `native` / `polyfilled`、`getBytesInUse` の `native` / `estimated` は実装方式であり、クォータやアクセス可否の保証ではありません。使用量の推定・名前空間のクォータ共有は通常のストレージと同じです。
+
+#### 監視・ライフサイクル・安全性
+
+- `watch<T>(key, callback)` はMAIN側のローカルなコールバック購読で、解除関数 `() => void` を返します。購読時には公開範囲やアクセス権を確認しないため、成功しても操作の許可を意味しません。
+- 通知は中継の登録後に発生した変更だけです。初期値や過去の変更を再送しません。現在値が必要なら別途 `getValue()` で読みます。型引数は実行時検証ではありません。
+- MAIN側の `storage.dispose()` はクライアントと監視を終了します。コンテンツスクリプト側の停止関数、`webext.storage.dispose()`、`webext.dispose()` はストレージ中継とその監視・リスナーを解除します。
+- `clear()` はスコープ内のキーを列挙してから削除するため非アトミックです。列挙後に追加されたキーまで削除できるとは限りません。
+- ストレージ用のWindow通信はメッセージング用と分離されており、`webext.messaging.bridgeMainWorld()` と併用できます。MAINスクリプトの注入と、中継登録後に要求する順序の確保は利用側の責任です。静的な `content_scripts` の `world: 'MAIN'` や、クリック後に初めて要求する方式を使えます。`eval` やインラインJSは不要です。
+- 転送はメッセージングと同じJSON互換値のみです。Date、Map、BigInt、循環参照などは拒否され、オブジェクト内の `undefined` プロパティは省略されます。`setValue(key, undefined)` は拒否します。ネイティブストレージで扱える値すべてが転送できるわけではありません。
+- 読み書きの失敗はPromiseの拒否で伝播します。中継側のエラーは `RemoteError`、応答待機の期限超過は `MessageTimeoutError` です。変更通知のJSON化失敗は中継側の `onError`、監視コールバックの例外はMAIN側の `onError` へ報告し、既定は `console.error` です。
+- **ページのスクリプトも通信を観測・偽造できます。** origin / source（Window）の確認は、拡張がバンドルしたMAINスクリプトを認証しません。名前空間も秘密や認証トークンではありません。公開スコープには秘密情報を保存せず、ページが読み取り、書込可の場合は変更・削除できるデータだけを公開してください。
+
 ## 型付きメッセージング
 
 同じチャンネル名・スキーマを送受信側で共有します。1つのリクエストは1つのコンテキストで処理してください。
@@ -322,7 +434,7 @@ Chrome / Firefox 向けの試験用拡張を生成できます。
 bun run demo:build
 ```
 
-読み込み方と操作手順は [demo/README.md](demo/README.md) を参照してください。
+読み込み方と操作手順は [demo/README.md](demo/README.md) を参照してください。example.com / example.org 上のMAIN world操作パネルでは、専用の `local.namespace('demo-main')` に対する読取・保存・削除・監視と、未公開スコープの拒否を試せます。通常のデモやメニュー記録の `demo` 名前空間はMAIN側に公開しません。
 
 ## 開発
 

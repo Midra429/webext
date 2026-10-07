@@ -1,8 +1,10 @@
 import type Browser from 'webextension-polyfill'
+import type { MainWorldStorageBridgeOptions } from './main-world-storage'
 
 import { createDisposables } from './disposables'
 import { UnsupportedOperationError } from './errors'
 import { facade } from './facade'
+import { createStorageBridge } from './main-world-storage'
 
 /**
  * 利用可能なストレージ領域に追加する共通ヘルパー。
@@ -126,9 +128,12 @@ export type StorageArea = Omit<Browser.Storage.StorageArea, 'getBytesInUse'> &
      * `{name}:{key}` 形式で保存する名前空間を選択します。
      * `name` は空文字・コロンを含む文字列を指定できません（同期的にTypeError）。
      * 戻り値の全メソッドは接頭辞なしのキーを受け取り、返すキーも接頭辞なしです。
+     * 型引数Schemaでキーと値の対応を定義できます。実行時検証は行いません。
      * 元の領域やネイティブAPIの動作は変更しません。
      */
-    namespace(name: string): NamespacedStorageArea
+    namespace<Schema extends object | undefined = undefined>(
+      name: string
+    ): NamespacedStorageArea<Schema>
   }
 
 /**
@@ -142,8 +147,65 @@ export type StorageArea = Omit<Browser.Storage.StorageArea, 'getBytesInUse'> &
  * `watch()` は元の領域と監視解除処理を共有します。ネイティブイベントは公開しません。
  * 名前空間はキーの整理用であり、権限・クォータ・アクセス制限を分離しません。
  */
-export type NamespacedStorageArea = StorageHelpers &
-  Pick<Browser.Storage.StorageArea, 'get' | 'set' | 'remove' | 'clear'>
+export type NamespacedStorageArea<
+  Schema extends object | undefined = undefined,
+> = Schema extends object
+  ? TypedStorageMethods<Schema> & Pick<StorageHelpers, 'capabilities'>
+  : StorageHelpers &
+      Pick<Browser.Storage.StorageArea, 'get' | 'set' | 'remove' | 'clear'>
+
+type StorageKey<Schema> = Extract<keyof Schema, string>
+type ExactStorageFields<Fields, Schema> = Fields & {
+  [K in keyof Fields]: K extends StorageKey<Schema> ? Schema[K] : never
+}
+type StorageWithDefaults<Schema, Defaults> = {
+  [K in keyof Defaults]: K extends keyof Schema
+    ? Exclude<Schema[K], undefined> | Defaults[K]
+    : never
+}
+
+/** スキーマはコンパイル時だけ利用します。保存値の検証・既定値保存・キーの除外は行いません。 */
+interface TypedStorageMethods<Schema extends object> {
+  /** 未保存のキーは辞書に含まれないため、全プロパティが任意です。 */
+  get(keys?: null): Promise<Partial<Schema>>
+  get<K extends StorageKey<Schema>>(
+    keys: K | readonly K[]
+  ): Promise<Partial<Pick<Schema, K>>>
+  get<Defaults extends object>(
+    defaults: ExactStorageFields<Defaults, Schema>
+  ): Promise<StorageWithDefaults<Schema, Defaults>>
+  set<Items extends object>(
+    items: ExactStorageFields<Items, Schema>
+  ): Promise<void>
+  remove(
+    keys: StorageKey<Schema> | readonly StorageKey<Schema>[]
+  ): Promise<void>
+  clear(): Promise<void>
+  /** 実保存データにはスキーマ外のキーも存在し得るため、string[]を返します。 */
+  getKeys(): Promise<string[]>
+  getBytesInUse(
+    keys?: StorageKey<Schema> | readonly StorageKey<Schema>[] | null
+  ): Promise<number>
+  getValue<K extends StorageKey<Schema>>(key: K): Promise<Schema[K] | undefined>
+  getValue<
+    K extends StorageKey<Schema>,
+    Default extends NoInfer<Schema[K] | undefined>,
+  >(
+    key: K,
+    defaultValue: Default
+  ): Promise<Exclude<Schema[K], undefined> | Default>
+  setValue<K extends StorageKey<Schema>>(
+    key: K,
+    value: NoInfer<Schema[K]>
+  ): Promise<void>
+  watch<K extends StorageKey<Schema>>(
+    key: K,
+    listener: (
+      value: Schema[K] | undefined,
+      previous: Schema[K] | undefined
+    ) => void
+  ): () => void
+}
 /**
  * 拡張機能のネイティブストレージと共通ヘルパー。
  *
@@ -152,6 +214,13 @@ export type NamespacedStorageArea = StorageHelpers &
  * @see https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/storage
  */
 export interface WebExtStorage {
+  /**
+   * 同じフレームのMAIN worldへ、指定した領域・名前空間だけを公開します。
+   * コンテンツスクリプト専用。既定は読取専用で、ページも通信を観測・偽装できます。
+   * 通信namespaceごとに1つ登録でき、解除関数・storage.disposeでも停止します。
+   * ストレージ権限と実領域へのアクセス権限が必要で、backgroundへの代替中継は行いません。
+   */
+  bridgeMainWorld(options: MainWorldStorageBridgeOptions): () => void
   /** ローカルに永続保存する領域。保存量の制限はネイティブに従います。 */
   local: StorageArea
   /** ブラウザの同期設定に従って同期する領域。容量・書き込み頻度の制限はネイティブに従います。 */
@@ -186,7 +255,7 @@ export interface WebExtStorage {
    */
   onChanged: Browser.Storage.Static['onChanged']
   /**
-   * このラッパーの `watch()` が登録した監視を解除します。
+   * このラッパーの `watch()` の監視とMAIN worldストレージ中継を解除します。
    *
    * @returns 戻り値はありません。
    * @remarks
@@ -293,9 +362,13 @@ function createNamespace(
  * @returns 監視の解除処理を管理するストレージラッパー。
  * @internal
  */
-export function createStorage(storage: Browser.Storage.Static): WebExtStorage {
+export function createStorage(
+  storage: Browser.Storage.Static,
+  context?: string
+): WebExtStorage {
   const areas: Record<string, StorageArea> = {}
   const disposers = createDisposables()
+  const bridges = new Set<string>()
   for (const name of ['local', 'sync', 'managed', 'session'] as const) {
     const area = storage[name] as NativeArea | undefined
     if (!area) continue
@@ -344,14 +417,36 @@ export function createStorage(storage: Browser.Storage.Static): WebExtStorage {
     }
     const wrapped: StorageArea = facade(area, {
       ...helpers,
-      namespace(namespace: string) {
-        return createNamespace(wrapped, namespace)
+      namespace<Schema extends object | undefined = undefined>(
+        namespace: string
+      ): NamespacedStorageArea<Schema> {
+        return createNamespace(
+          wrapped,
+          namespace
+        ) as NamespacedStorageArea<Schema>
       },
     })
     areas[name] = wrapped
   }
   return facade(storage, {
     ...areas,
+    bridgeMainWorld(options: MainWorldStorageBridgeOptions) {
+      if (context !== 'content-script')
+        throw new UnsupportedOperationError(
+          'storage.bridgeMainWorld outside content-script'
+        )
+      if (bridges.has(options.namespace))
+        throw new Error(
+          'A MAIN world storage bridge is already registered for this namespace'
+        )
+      const namespace = options.namespace
+      const stop = createStorageBridge(areas, storage, options)
+      bridges.add(namespace)
+      return disposers.add(() => {
+        bridges.delete(namespace)
+        stop()
+      })
+    },
     dispose() {
       disposers.dispose()
     },

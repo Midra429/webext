@@ -1,5 +1,9 @@
 import type { NamespacedStorageArea } from '../../src'
-import type { BackgroundMessages, ContentMessages } from './messages'
+import type {
+  BackgroundMessages,
+  ContentMessages,
+  DemoStoredValue,
+} from './messages'
 
 import { RemoteError, webext } from '../../src'
 import { createOperations } from './operations'
@@ -55,7 +59,7 @@ function log(label: string, value: unknown, kind = 'success') {
   while (results.children.length > 20) results.lastElementChild?.remove()
   status.textContent = `${label}: ${kind === 'error' ? 'エラー（詳細はログを確認）' : '完了'}`
 }
-function storage(): NamespacedStorageArea {
+function storage(): NamespacedStorageArea<DemoStoredValue> {
   const name = areaSelect.value
   if (
     name !== 'local' &&
@@ -66,7 +70,7 @@ function storage(): NamespacedStorageArea {
     throw new Error('不正なストレージ領域です')
   const area = webext.storage[name]
   if (!area) throw new Error(`${name} はこの環境で利用できません`)
-  return area.namespace('demo')
+  return area.namespace<DemoStoredValue>('demo')
 }
 function updateControls() {
   const cap = webext.side.capabilities
@@ -190,7 +194,7 @@ bind('watch', '変更監視', () => {
     return '監視を停止しました'
   }
   const name = areaSelect.value
-  stopWatch = storage().watch<string>('value', (value, previous) => {
+  stopWatch = storage().watch('value', (value, previous) => {
     log(
       `watch (${name})`,
       { previous: previous ?? null, value: value ?? null },

@@ -187,7 +187,8 @@ export function createWebExt(options: CreateWebExtOptions = {}): WebExt {
     normalizePath: (path) => normalizeExtensionPath(path, extensionUrl),
     openPopout,
   })
-  const storage = api.storage && createStorage(api.storage)
+  const storage =
+    api.storage && createStorage(api.storage, context.type ?? undefined)
   const instance = facade(api, {
     native,
     context,

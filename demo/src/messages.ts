@@ -1,3 +1,7 @@
+export interface DemoStoredValue {
+  value: string
+}
+
 export interface BackgroundMessages {
   echo: {
     request: { text: string }

@@ -74,7 +74,8 @@ export function createWindowTransport(
       }
       return
     }
-    if (data.kind !== 'request') return
+    const notification = data.kind === 'notification'
+    if (data.kind !== 'request' && !notification) return
     const message = data.message
     if (
       !message ||
@@ -85,8 +86,9 @@ export function createWindowTransport(
       typeof message.empty !== 'boolean'
     )
       return
-    const respond = (response: unknown) =>
-      post({ kind: 'response', id: data.id, response })
+    const respond = (response: unknown) => {
+      if (!notification) post({ kind: 'response', id: data.id, response })
+    }
     try {
       // DOM経由の値もネイティブ通信と同じJSON制約で検証します。
       const snapshot = encode(message) as Record<string, unknown>
@@ -109,6 +111,16 @@ export function createWindowTransport(
   window.addEventListener('message', listener)
   return {
     window,
+    /** 応答待機を作らず、JSON互換のイベントを同じフレームへ通知します。 */
+    notify(message: Record<string, unknown>) {
+      if (disposed) throw new Error('MAIN world messaging is disposed')
+      post({
+        kind: 'notification',
+        id: '',
+        message: encode(message),
+        sender: {},
+      })
+    },
     send(
       message: Record<string, unknown>,
       sender: MessageSender,

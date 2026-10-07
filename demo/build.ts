@@ -4,8 +4,8 @@ import { basename, join } from 'node:path'
 const root = import.meta.dir
 const source = join(root, 'src')
 const result = await Bun.build({
-  entrypoints: ['background.ts', 'page.ts', 'content.ts'].map((file) =>
-    join(source, file)
+  entrypoints: ['background.ts', 'page.ts', 'content.ts', 'main.ts'].map(
+    (file) => join(source, file)
   ),
   target: 'browser',
   format: 'iife',
@@ -25,6 +25,12 @@ const common = {
     {
       matches: ['https://example.com/*', 'https://example.org/*'],
       js: ['content.js'],
+      run_at: 'document_idle',
+    },
+    {
+      matches: ['https://example.com/*', 'https://example.org/*'],
+      js: ['main.js'],
+      world: 'MAIN',
       run_at: 'document_idle',
     },
   ],
@@ -69,6 +75,7 @@ for (const [browser, manifest] of Object.entries(manifests)) {
   for (const file of [
     'background.js',
     'content.js',
+    'main.js',
     'page.js',
     'popup.html',
     'sidepanel.html',
