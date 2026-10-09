@@ -33,6 +33,44 @@ test('registrations added during cleanup are retained for the next disposal', ()
   expect(later).toHaveBeenCalledTimes(1)
 })
 
+test('disposal attempts every cleanup before rethrowing a single failure', () => {
+  const disposers = createDisposables()
+  const failure = new Error('Cleanup failed')
+  const first = mock(() => {
+    throw failure
+  })
+  const second = mock(() => {})
+  disposers.add(first)
+  disposers.add(second)
+  expect(() => disposers.dispose()).toThrow(failure)
+  expect(second).toHaveBeenCalledTimes(1)
+  disposers.dispose()
+  expect(first).toHaveBeenCalledTimes(1)
+  expect(second).toHaveBeenCalledTimes(1)
+})
+
+test('disposal preserves multiple failures in registration order', () => {
+  const disposers = createDisposables()
+  const failures = [new Error('First cleanup'), new Error('Second cleanup')]
+  for (const failure of failures)
+    disposers.add(() => {
+      throw failure
+    })
+  const later = mock(() => {})
+  disposers.add(later)
+  let caught: unknown
+  try {
+    disposers.dispose()
+  } catch (error) {
+    caught = error
+  }
+  expect(caught).toBeInstanceOf(AggregateError)
+  expect((caught as AggregateError).errors).toEqual(failures)
+  expect(later).toHaveBeenCalledTimes(1)
+  disposers.dispose()
+  expect(later).toHaveBeenCalledTimes(1)
+})
+
 test('facades preserve native receivers and cache bindings without modifying their source', () => {
   const symbol = Symbol('native')
   const native = {

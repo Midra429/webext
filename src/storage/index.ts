@@ -328,11 +328,13 @@ export function createStorage(
       ) {
         if (!storage.onChanged)
           throw new UnsupportedOperationError('storage.watch')
+        let active = true
         const onChanged = (
           changes: Record<string, Browser.Storage.StorageChange>,
           areaName: string
         ) => {
-          if (areaName !== name || !Object.hasOwn(changes, key)) return
+          if (!active || areaName !== name || !Object.hasOwn(changes, key))
+            return
           const change = changes[key]!
           listener(
             change.newValue as T | undefined,
@@ -340,7 +342,10 @@ export function createStorage(
           )
         }
         storage.onChanged.addListener(onChanged)
-        return disposers.add(() => storage.onChanged.removeListener(onChanged))
+        return disposers.add(() => {
+          active = false
+          storage.onChanged.removeListener(onChanged)
+        })
       },
     }
     const wrapped: StorageArea = facade(area, {

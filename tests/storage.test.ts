@@ -227,6 +227,50 @@ test('namespace watches share disposal and reject other namespaces or areas', ()
   expect(listeners.size).toBe(0)
 })
 
+test.each([
+  { namespaced: false, cleanup: 'stop' },
+  { namespaced: true, cleanup: 'stop' },
+  { namespaced: false, cleanup: 'dispose' },
+  { namespaced: true, cleanup: 'dispose' },
+])(
+  'storage watches skip callbacks removed during notification: %j',
+  ({ namespaced, cleanup }) => {
+    const { storage, emit, listeners, removeListener } = storageApi()
+    const area = namespaced
+      ? storage.local.namespace('settings')
+      : storage.local
+    const key = namespaced ? 'settings:theme' : 'theme'
+    let stop = () => {}
+    const first = mock(() => {
+      if (cleanup === 'dispose') storage.dispose()
+      else stop()
+    })
+    const second = mock((_value: string | undefined) => {})
+    area.watch('theme', first)
+    stop = area.watch('theme', second)
+    const pending = [...listeners]
+    try {
+      emit({ [key]: { newValue: 'dark' } }, 'local')
+      expect(first).toHaveBeenCalledTimes(1)
+      expect(second).not.toHaveBeenCalled()
+      expect(listeners.size).toBe(cleanup === 'dispose' ? 0 : 1)
+      stop()
+      expect(removeListener).toHaveBeenCalledTimes(
+        cleanup === 'dispose' ? 2 : 1
+      )
+      storage.dispose()
+      // ネイティブ側が解除前に取得したリスナーも、解除後は通知しない。
+      for (const listener of pending)
+        listener({ [key]: { newValue: 'light' } }, 'local')
+      expect(first).toHaveBeenCalledTimes(1)
+      expect(second).not.toHaveBeenCalled()
+      expect(removeListener).toHaveBeenCalledTimes(2)
+    } finally {
+      storage.dispose()
+    }
+  }
+)
+
 test('storage watches filter by area and key, report removals and stop exactly once', () => {
   const { storage, listeners, emit, removeListener } = storageApi()
   const local = mock(

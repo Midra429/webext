@@ -1,6 +1,10 @@
 /** JSON に限定し、Chrome と Firefox のペイロードの扱いを統一します。 */
 export function encode(value: unknown): unknown {
   if (value === undefined) return null
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return value
+  if (typeof value === 'number' && Number.isFinite(value))
+    return value === 0 ? 0 : value
   const snapshots = new WeakMap<object, unknown>()
   const visit = (item: unknown, ancestors: Set<object>): unknown => {
     if (item === null || typeof item === 'string' || typeof item === 'boolean')

@@ -42,7 +42,7 @@ Manifest V3 と Promise 版のネイティブ API がある、最新版の Chrom
 
 ### 1. バックグラウンドで初期化
 
-**バックグラウンドのトップレベルで `webext.initialize()` を同期的に呼んでください。** コンテンツスクリプト用のタブ取得ブリッジを登録します。サービスワーカーの再起動時も、トップレベルで再登録されます。
+**バックグラウンドのトップレベルで `webext.initialize()` を同期的に呼んでください。** コンテンツスクリプト用のタブ取得ブリッジと、Chrome のサイドパネルのパス補完用ブリッジ・タブ監視を登録します。サービスワーカーの再起動時も、トップレベルで再登録されます。
 
 ```ts
 import { webext } from '@midra/webext'
@@ -59,7 +59,7 @@ const tab = await webext.tabs.getTarget()
 const keys = await webext.storage.local.getKeys()
 ```
 
-`webext` は最初のアクセス時に初期化します。モジュールのインポートだけなら拡張機能以外でも可能ですが、API へのアクセスには拡張機能の環境が必要です。
+`webext` は最初のアクセス時に初期化します。モジュールのインポートだけなら拡張機能以外でも可能ですが、API へのアクセスには拡張機能の環境が必要です。`createWebExt()` は作成時に `initialize()` を自動で呼びます。`initialize()` を複数回呼んでも登録は増えません。
 
 ### 実行コンテキストを明示する場合
 
@@ -69,7 +69,7 @@ import { createWebExt } from '@midra/webext'
 const webext = createWebExt({ context: 'sidepanel' })
 ```
 
-`api`、`url`、`browser` も明示指定できます。テストでは `api` を注入できます。
+`api`、`url`、`browser` も明示指定できます。テストでは `api` を注入できます。Firefox のパネル内では、初期化時にユーザー操作なしのクローズ要求を受信する処理も登録します。
 
 | プロパティ | 値・用途 |
 | --- | --- |
@@ -83,38 +83,125 @@ const webext = createWebExt({ context: 'sidepanel' })
 | API | 動作 |
 | --- | --- |
 | `available` | 開くためのAPIがあるか。表示状態ではありません |
-| `capabilities` | `open` / `close` / `path` / `isOpen` / `targetedOpen` / `actionClick` の対応状況 |
-| `open()` | 現在のウィンドウで開く |
-| `close()` | 閉じる。パネルを無効化したりパスを変更したりしません |
-| `getPath({ tabId? }?)` | 設定中の拡張ルート相対パスを返す。クエリ・ハッシュを保持 |
-| `setPath(path, { tabId? }?)` | パスを変更。対象省略時はグローバル設定 |
-| `isOpen({ windowId? }?)` | 指定ウィンドウ（省略時は現在）で表示されているか |
+| `capabilities` | `open` / `close` / `path` / `windowPath` / `backgroundClose` / `isOpen` / `targetedOpen` / `actionClick` の対応状況 |
+| `open({ tabId?, windowId? }?)` | 開く。対象省略時は現在のウィンドウ。Firefoxは明示的な対象指定に未対応 |
+| `close({ tabId?, windowId? }?)` | 対象のパネルを閉じる。省略時は現在のウィンドウ。無効化・パス変更はしません |
+| `getPath({ tabId?, windowId? }?)` | 設定中の拡張ルート相対パスを返す。クエリ・ハッシュを保持 |
+| `setPath(path, { tabId?, windowId? }?)` | タブ／ウィンドウにパスを紐付ける。対象省略時はグローバル設定 |
+| `isOpen({ tabId?, windowId? }?)` | 対象の開状態を判定。省略時は現在のウィンドウ。Chromeはドキュメントの存在による判定 |
 | `openPopout(options?)` | 対象タブに設定中のパネルを別ウィンドウで開く |
-| `bindActionClick(onError)` | actionクリック時に開く。解除関数を返す |
+| `bindActionClick(onError)` | actionクリック時に開く。Chromeはクリックしたタブを対象にし、Firefoxはアクティブなウィンドウで開く。解除関数を返す |
+
+### パスの紐付けと初期設定
+
+`getPath()` / `setPath()` の `tabId` と `windowId` は同時指定できません。タブのパスは **タブ > ウィンドウ > グローバル** の順で解決します。`getPath({ windowId })` はウィンドウ設定、なければグローバル設定を返し、引数なしの `getPath()` はグローバル設定を返します。`windowId: -2` は現在のウィンドウです。
 
 ```ts
-// backgroundのトップレベル。actionに default_popup があるとクリックイベントは発火しません。
+// background.ts
+import { webext } from '@midra/webext'
+
+// トップレベルで同期登録。サービスワーカーの起動ごとに必要です。
+webext.initialize()
 const unbind = webext.side.bindActionClick(console.error)
 
-// 拡張ページのボタンから開く場合
-button.addEventListener('click', () => {
+async function configurePaths() {
+  await webext.side.setPath('ui/side.html') // グローバル
+  const tab = await webext.tabs.getCurrentActive()
+  if (tab?.id === undefined) return
+
+  await webext.side.setPath('ui/window-side.html', { windowId: tab.windowId })
+  await webext.side.setPath('ui/tab-side.html', { tabId: tab.id }) // 最優先
+}
+
+// パスはユーザーが開く前に設定。クリックハンドラー内で設定を待たないでください。
+webext.runtime.onInstalled.addListener(() => {
+  void configurePaths().catch(console.error)
+})
+```
+
+タブ切替時のパネル切替はブラウザのネイティブ動作に任せます。ライブラリが切替のたびに `open()` を呼ぶことはありません。
+
+- **Firefox**：タブ／ウィンドウ別パスはネイティブの `sidebarAction.setPanel()` を使います。
+- **Chrome**：ウィンドウ別パスを、そのウィンドウに属するタブ別のネイティブ設定へ反映して補完します。`storage` 権限による `storage.session` の利用と、background のトップレベルでの初期化が必要です。background 以外の `getPath()` / `setPath()` も、この補完が利用可能な環境では background へ中継します。
+- Chrome は初期化時の既存タブ、新規タブ、ウィンドウ間のタブ移動、タブのアクティブ化で設定を同期し、明示的なタブ設定を優先します。設定は `storage.session` に保持するため、サービスワーカーの再起動後も再同期できます。グローバルパスがない状態で scoped 設定をすると、そのパスをグローバルのフォールバックにも設定します。
+- **Chrome のウィンドウ別パスは、同じウィンドウで単一のパネルインスタンスを共有する機能ではありません。** 実体はタブ別のパネルドキュメントであり、同じパスでもメモリ上の状態は共有されません。状態共有が必要ならストレージやメッセージングを使ってください。
+
+### ユーザー操作から開く
+
+```ts
+// 拡張ページのボタンから、現在のウィンドウで開く場合
+import { webext } from '@midra/webext'
+
+const button = document.querySelector<HTMLButtonElement>('#open-side')
+button?.addEventListener('click', () => {
   void webext.side.open().catch(console.error)
 })
-
-// パス設定はユーザー操作より前の初期設定時などに実行
-await webext.side.setPath('ui/side.html')
-await webext.side.openPopout({ width: 420, height: 720 })
 ```
+
+- `open()` はユーザー操作のハンドラーから直接呼びます。内部でネイティブ呼び出し前の非同期検索・設定更新は行いません。
+- Chrome でタブ固有のパネル（ウィンドウ別パス補完を含む）を開くには `{ tabId }` を指定してください。対象省略または `{ windowId }` だけではグローバルパネルを開きます。`bindActionClick()` はクリックしたタブのIDを渡すため、タブ／ウィンドウ別パスを利用できます。
+- Chrome の対象省略時は同期的に `windowId: -2`（`WINDOW_ID_CURRENT`）を渡します。この定数に未対応の古い Chrome では、クリックイベントの `tab.windowId` など実際のIDを指定してください。
+- Firefox の `open()` はアクティブなウィンドウでのみ開きます。明示的な `{ tabId }` / `{ windowId }` は引き続き未対応で、`UnsupportedOperationError` になります（`windowId: -2` は許可）。パスの紐付けや任意クローズが利用できても、ユーザー操作なし・別ウィンドウへの `open()` はできません。
+- `bindActionClick()` は background のトップレベルで登録します。action に `default_popup` があるとクリックイベントは発火しません。解除は戻り値、または `webext.dispose()` で行えます。
+
+### ユーザー操作なしで閉じる・状態を確認する
+
+Chrome の `close()` は **Chrome 141+** のネイティブAPIを利用します。`{ tabId }` 指定でタブ固有設定がなければ所属ウィンドウのグローバルパネルを閉じ、`{ windowId }` 指定ではそのウィンドウのタブ別パネルも閉じます。
+
+Firefox のユーザー操作なしの `close()` は **Firefox 133+** で、初期化済みのパネルドキュメントへ自分自身を閉じるよう依頼する協調処理です。background の初期化だけでなく、**各パネルのトップレベルでも初期化してください**。動的なパスではコンテキストを明示します。
+
+```ts
+// パネルのエントリーポイント（動的なパスでも確実にパネルとして初期化）
+import { createWebExt } from '@midra/webext'
+
+const webext = createWebExt({ context: 'sidepanel' }) // initialize() も自動実行
+```
+
+マニフェストから `sidepanel` と判定できるパスで既定の遅延インスタンスを使う場合も、インポートだけで終わらせず、明示的に初期化します。
+
+```ts
+// パネルのエントリーポイント（マニフェストのパスを使用する場合）
+import { webext } from '@midra/webext'
+
+webext.initialize()
+```
+
+Firefox のサイドパネルはウィンドウごとの単一ドキュメントとして運用します。同じパネルドキュメントでは上のいずれか一方を使い、**単一インスタンスで初期化してください**。受信処理はトップレベルの実際のサイドパネルだけに登録され、同じHTMLを通常タブやポップアウトで開いても、それらは閉じません。
+
+```ts
+// backgroundなど。ユーザー操作なしで、任意のタブ／ウィンドウを対象にする例
+import { webext } from '@midra/webext'
+
+webext.initialize() // backgroundのトップレベル
+
+async function closeAndCheck(target: { tabId?: number; windowId?: number }) {
+  if (!webext.side.capabilities.backgroundClose)
+    throw new Error('ユーザー操作なしのクローズは未対応です')
+
+  const before = await webext.side.isOpen(target)
+  await webext.side.close(target)
+  const after = await webext.side.isOpen(target)
+  return { before, after }
+}
+
+// closeAndCheck({ windowId }) または closeAndCheck({ tabId })
+// 呼び出し側でPromiseの拒否を処理してください。
+```
+
+- Firefox の協調クローズは `{ windowId }` と `{ tabId }` に対応します。タブ指定はそのタブがアクティブな場合に所属ウィンドウのパネルを閉じ、非アクティブな場合は何もしません。既に閉じている場合も何もしません。
+- **開いている Firefox パネルが未初期化なら、クローズ要求は受信先なしとして拒否されます。成功したようには扱いません。** 受信応答後も実際の終了を確認し、閉じなければ拒否します。Firefox 133 未満のネイティブ `close()` にはユーザー操作が必要で、明示的な対象指定は未対応です。
+- `isOpen({ tabId })` は非アクティブタブでは `false` を返します。`isOpen({ windowId })` は指定ウィンドウ、省略または `windowId: -2` は現在のウィンドウを対象にします。タブと実際のウィンドウIDを同時指定する場合、所属が一致する必要があります。
+- Firefox の `isOpen()` は `sidebarAction.isOpen()` によるネイティブの表示状態です。Chrome は `runtime.getContexts()` の `SIDE_PANEL` ドキュメントの存在を観測し、タブ指定時は対象タブまたはグローバル、ウィンドウ指定時はアクティブタブまたはグローバルのコンテキストを調べます。**Chrome では非表示でもドキュメントが残る場合や、切替・終了途中があり、厳密なUI表示状態やクローズ直後の `false` を保証しません。**
 
 ### マニフェスト設定
 
-Chrome の設定（関連部分のみ）：
+Chrome の設定（パス補完に必要な `storage` 権限を含む関連部分のみ）：
 
 ```json
 {
   "manifest_version": 3,
   "action": {},
-  "permissions": ["sidePanel"],
+  "permissions": ["sidePanel", "storage"],
   "side_panel": { "default_path": "ui/side.html" }
 }
 ```
@@ -131,15 +218,13 @@ Firefox の設定（関連部分のみ）：
 
 パネル用 HTML は利用側で用意してください。マニフェストのビルド時変換は行いません。
 
-### サイドパネルの制約
+### 対応状況とその他の制約
 
-- `open()` はユーザー操作から直接呼びます。内部でネイティブ呼び出し前の非同期検索・設定更新は行いません。
-- Chromeの対象省略は現在のウィンドウのグローバルパネル。タブ固有のパネルには `{ tabId }` を指定します。`open()` は同期的に `WINDOW_ID_CURRENT` を渡します。この定数に未対応の古いChromeでは、クリックイベントの `tab.windowId` など実際のIDを指定してください。
-- Firefoxは明示的な開閉対象指定に対応しません（`windowId: -2` は現在のウィンドウとして扱います）。未対応操作は `UnsupportedOperationError` になります。
-- `getPath()` は両ブラウザでルート相対パスに統一。`setPath()` は同じ拡張内の絶対URLも受け付けます。外部URLは拒否します。
-- `isOpen()` はFirefoxの `sidebarAction.isOpen()` / Chromeの `runtime.getContexts()` を利用します。`capabilities.isOpen` は `native` / `document` / `false`。Chromeではパネルドキュメントの存在を観測するため、切り替え・終了途中などの厳密なUI表示状態とは一致しない可能性があります。未対応環境ではエラーにします。
-- `available` / `capabilities` はAPIの存在確認です。権限やmanifest設定が正しいことまでは保証しません。
-- `bindActionClick()` はbackground起動時に登録してください。解除は戻り値、または `webext.dispose()` で行えます。
+- `capabilities.windowPath` はウィンドウ別パスの利用に必要なAPIがあるかを示します。Chrome で補完用APIがなければ、ウィンドウ別の `getPath()` / `setPath()` は `UnsupportedOperationError` になります。
+- `capabilities.backgroundClose` は `native`（Chrome）/ `document`（Firefox の協調処理）/ `false`。`capabilities.isOpen` は `native`（Firefox）/ `document`（Chrome）/ `false`。`capabilities.targetedOpen` は明示的な対象を指定して**開く**対応状況であり、クローズの対応状況ではありません。
+- `available` / `capabilities` はAPIの存在確認です。権限・manifest設定・バージョン要件や、background／パネル側の初期化完了、操作の成功までは保証しません。未対応操作やネイティブAPIの失敗はPromiseの拒否として伝播します。
+- `getPath()` は両ブラウザでルート相対パスに統一。`setPath()` は同じ拡張内の絶対URLも受け付けますが、外部URLや空文字列による設定解除は拒否します。パス設定だけではパネルを開きません。
+- `openPopout()` は対象タブの解決済みパスを使います。サイドパネルの開閉や既存タブの移動は行いません。
 - 配置、無効化、ブラウザ固有の開閉イベントなどはネイティブAPIを利用してください。ダミーイベントは提供しません。
 
 ## タブ
@@ -515,7 +600,8 @@ bun run build
 
 - `src/index.ts` / `src/core.ts`：公開エントリー、APIの組み立てと初期化。
 - `src/context.ts` / `src/paths.ts`：実行環境判定、拡張内URLの検証。
-- `src/tabs.ts` / `src/popout.ts` / `src/side.ts`：タブ取得、ポップアウト、サイドパネルのブラウザ差異の吸収。
+- `src/tabs.ts` / `src/popout.ts`：タブ取得、ポップアウト。
+- `src/side/`：`index.ts`に共通操作と初期化、`types.ts`に公開型、`native.ts`にネイティブAPIの型と対象の検証、`paths.ts`にChromeのウィンドウ別パス補完、`close.ts`にFirefoxのパネルドキュメント経由のクローズ処理。
 - `src/storage/`：`index.ts`にネイティブ領域のラッパーと公開型、`namespace.ts`に名前空間操作・検証・バイト数推定、`migrations.ts`にバージョン付き移行・進捗保護・実行待機管理、`main-world.ts`にMAIN worldクライアントと限定公開ブリッジ。
 - `src/messaging/`：`index.ts`を入口とし、`types.ts`に公開型、`factory.ts`にチャンネルの管理・ルーティング、`protocol.ts`に共通応答形式、`serialization.ts`にJSON検証、`transport.ts` / `window.ts`に送信・待機とDOM通信。
 - `src/disposables.ts` / `src/facade.ts`：解除処理の管理、ネイティブAPIを変更しないラッパー。
@@ -523,6 +609,8 @@ bun run build
 - `demo/src/operations.ts`：ユーザー操作を維持した実行と、ボタンごとの実行中状態の管理。
 
 ネイティブメッセージの受信リスナーは `createWebExt()` のインスタンスごとに1つを共有し、handlerまたはMAIN world中継が存在する間だけ登録します。ストレージの監視とactionクリックの解除関数は、繰り返し呼んでも解除処理を重複実行しません。
+
+`createWebExt()` の初期化に失敗した場合、途中まで登録したリスナーを解除してから例外を返します。解除処理の一部が失敗しても、ほかの領域の解除処理を続行します。失敗が1件なら元の例外、複数なら `AggregateError` として伝播します。
 
 ### 検証範囲
 

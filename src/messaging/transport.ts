@@ -28,6 +28,7 @@ export async function sendMessage<Response>(
   transport?: RequestTransport
 ): Promise<Response> {
   const timeoutMs = options.timeoutMs ?? 10_000
+  const signal = options.signal
   if (
     !Number.isFinite(timeoutMs) ||
     timeoutMs <= 0 ||
@@ -37,8 +38,8 @@ export async function sendMessage<Response>(
       `timeoutMs must be positive, finite and at most ${MAX_TIMEOUT_MS}`
     )
   }
-  if (options.signal?.aborted)
-    throw options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+  if (signal?.aborted)
+    throw signal.reason ?? new DOMException('Aborted', 'AbortError')
   if (options.tabId !== undefined) assertTabId(options.tabId)
   if (
     options.tabId === undefined &&
@@ -94,14 +95,11 @@ export async function sendMessage<Response>(
           () => reject(new MessageTimeoutError(timeoutMs)),
           timeoutMs
         )
-        if (options.signal) {
+        if (signal) {
           onAbort = () =>
-            reject(
-              options.signal?.reason ??
-                new DOMException('Aborted', 'AbortError')
-            )
-          options.signal.addEventListener('abort', onAbort, { once: true })
-          if (options.signal.aborted) onAbort()
+            reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+          signal.addEventListener('abort', onAbort, { once: true })
+          if (signal.aborted) onAbort()
         }
       }),
     ])) as
@@ -125,6 +123,6 @@ export async function sendMessage<Response>(
   } finally {
     pending?.dispose()
     if (timer !== undefined) clearTimeout(timer)
-    if (onAbort) options.signal?.removeEventListener('abort', onAbort)
+    if (onAbort) signal?.removeEventListener('abort', onAbort)
   }
 }

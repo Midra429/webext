@@ -9,6 +9,7 @@ import type { WebExtStorage } from './storage'
 import type { WebExtTabs } from './tabs'
 
 import { createContext } from './context'
+import { disposeAll } from './disposables'
 import { facade, lazyFacade } from './facade'
 import { createMessaging } from './messaging'
 import { normalizeExtensionPath } from './paths'
@@ -112,24 +113,25 @@ export type WebExt = Omit<
     ): Promise<Browser.Windows.Window | undefined>
   }
   /**
-   * background側の内部タブ取得ブリッジを同期的に登録します。
+   * background側の内部ブリッジ・パネル関連付け監視、Firefoxのパネル側クローズ受信を登録します。
    *
    * @remarks
    * backgroundのトップレベルで呼んでください。service workerの起動ごとに同期登録される必要があります。
    * `createWebExt()` は作成時にもこの処理を呼びます。遅延初期化される `webext` では、
    * トップレベルの `webext.initialize()` により初期化と登録をその場で行えます。
-   * 複数回呼んでも登録は増えず、background以外では何もしません。
+   * 複数回呼んでも登録は増えません。Firefoxのサイドパネルでは自身を閉じる要求を受信します。
    * @throws {UnsupportedOperationError} backgroundでネイティブのtabs APIが利用できない場合。同期例外です。
    * @see https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/events
    */
   initialize(): void
   /**
-   * このインスタンスのメッセージ受信、storage.watch、actionクリック連携を解除します。
+   * このインスタンスのメッセージ受信、storage.watch、パネル関連付け監視、actionクリック連携を解除します。
    *
    * @remarks
    * 繰り返し呼べます。保存値・パネル・ネイティブ設定・直接登録されたリスナーは変更しません。
    * MAIN world中継のDOM応答待機は拒否します。ネイティブ送信の待機や実行中の受信処理は継続します。
    * メッセージングは終端的に破棄されるため、再利用には `createWebExt()` で新しいインスタンスを作成してください。
+   * @throws {Error} 解除処理の失敗。ほかの解除処理も実行してから伝播し、複数の失敗は `AggregateError` にまとめます。
    */
   dispose(): void
 }
@@ -167,7 +169,11 @@ export function createWebExt(options: CreateWebExtOptions = {}): WebExt {
   const extensionUrl = new URL(api.runtime.getURL('/'))
   const context = createContext(api, extensionUrl, options)
   const messaging = createMessaging(api, context.type ?? undefined)
-  const { tabs, initialize } = createTabs(api, context, messaging)
+  const { tabs, initialize: initializeTabs } = createTabs(
+    api,
+    context,
+    messaging
+  )
   const { resolveTabId, openPopout } = createPopout(api, extensionUrl, () =>
     tabs.getTargetId()
   )
@@ -182,11 +188,17 @@ export function createWebExt(options: CreateWebExtOptions = {}): WebExt {
         return openPopout(path, { ...options, tabId })
       },
     })
-  const side = createSide(api, {
+  const { side, initialize: initializeSide } = createSide(api, {
+    context,
+    messaging,
     resolveTabId,
     normalizePath: (path) => normalizeExtensionPath(path, extensionUrl),
     openPopout,
   })
+  function initialize() {
+    initializeTabs()
+    initializeSide()
+  }
   const storage =
     api.storage && createStorage(api.storage, context.type ?? undefined)
   const instance = facade(api, {
@@ -200,12 +212,26 @@ export function createWebExt(options: CreateWebExtOptions = {}): WebExt {
     messaging,
     initialize,
     dispose() {
-      side.dispose()
-      storage?.dispose()
-      messaging.dispose()
+      disposeAll([
+        () => side.dispose(),
+        () => storage?.dispose(),
+        () => messaging.dispose(),
+      ])
     },
   }) as unknown as WebExt
-  initialize()
+  try {
+    initialize()
+  } catch (error) {
+    try {
+      instance.dispose()
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        'webext: initialization and cleanup failed'
+      )
+    }
+    throw error
+  }
   return instance
 }
 

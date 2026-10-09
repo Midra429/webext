@@ -1,5 +1,5 @@
 import type Browser from 'webextension-polyfill'
-import type { MessagingApi } from '../src/messaging'
+import type { MessagingApi, SendOptions } from '../src/messaging'
 
 import { expect, mock, spyOn, test } from 'bun:test'
 
@@ -358,6 +358,57 @@ test.each([
   }
 )
 
+test.each(['success', 'abort', 'timeout'] as const)(
+  'a %s uses and cleans up the original signal even if send options change',
+  async (outcome) => {
+    const { api, runtime } = bus()
+    let finish!: (value: unknown) => void
+    runtime.sendMessage = mock(
+      () =>
+        new Promise<unknown>((resolve) => {
+          finish = resolve
+        })
+    )
+    const messaging = createMessaging(api)
+    const channel = messaging.channel<Schema>('app')
+    const original = new AbortController()
+    const replacement = new AbortController()
+    const options: SendOptions = {
+      timeoutMs: outcome === 'timeout' ? 5 : 100,
+      signal: original.signal,
+    }
+    const add = spyOn(original.signal, 'addEventListener')
+    const removeOriginal = spyOn(original.signal, 'removeEventListener')
+    const removeReplacement = spyOn(replacement.signal, 'removeEventListener')
+    try {
+      const pending = channel.send('echo', 'value', options)
+      options.signal = replacement.signal
+      if (outcome === 'success') {
+        finish(response)
+        expect(await pending).toBe('value')
+      } else if (outcome === 'abort') {
+        const reason = new Error('Original signal cancelled')
+        original.abort(reason)
+        await expect(pending).rejects.toBe(reason)
+      } else {
+        await expect(pending).rejects.toBeInstanceOf(MessageTimeoutError)
+      }
+      expect(removeOriginal).toHaveBeenCalledWith(
+        'abort',
+        add.mock.calls[0]?.[1]
+      )
+      expect(removeReplacement).not.toHaveBeenCalled()
+    } finally {
+      const listener = add.mock.calls[0]?.[1]
+      if (listener) original.signal.removeEventListener('abort', listener)
+      add.mockRestore()
+      removeOriginal.mockRestore()
+      removeReplacement.mockRestore()
+      messaging.dispose()
+    }
+  }
+)
+
 test('pre-abort and abort during the native call reject without leaking listeners', async () => {
   const { api, runtime } = bus()
   const messaging = createMessaging(api)
@@ -477,6 +528,14 @@ test('the default wait remains ten seconds and send methods keep native receiver
   } finally {
     setTimer.mockRestore()
     messaging.dispose()
+  }
+})
+
+test('encoding top-level JSON primitives preserves their values and normalizes negative zero', () => {
+  for (const value of [undefined, null, true, false, '', 'value', 0, -0, 1.5]) {
+    const result = encode(value)
+    expect(result).toBe(value === undefined ? null : value === 0 ? 0 : value)
+    expect(Object.is(result, -0)).toBe(false)
   }
 })
 
